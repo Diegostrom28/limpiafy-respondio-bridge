@@ -37,7 +37,24 @@ function normalizeText(value) {
 }
 
 function compactText(value) {
-  return normalizeText(value).replace(/[^a-z0-9]/g, "");
+  return normalizeText(value)
+    .replace(/\uFFFD/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function textMatches(candidate, search) {
+  const candidateCompact = compactText(candidate);
+  const searchCompact = compactText(search);
+
+  if (!candidateCompact || !searchCompact) {
+    return false;
+  }
+
+  return (
+    candidateCompact === searchCompact ||
+    candidateCompact.includes(searchCompact) ||
+    searchCompact.includes(candidateCompact)
+  );
 }
 
 function isNumericId(value) {
@@ -253,14 +270,19 @@ async function resolveCityId(value) {
     return String(value);
   }
 
-  const rows = await callBuscar("DEPARTAMENTOS_CIUDADES", String(value));
+  const rows = await callBuscar("DEPARTAMENTOS_CIUDADES", "");
   console.log("Registros de ciudad encontrados:", rows.length);
 
   const ranked = rows
-    .map((row) => ({
-      row,
-      score: scoreRow(row, [value])
-    }))
+    .map((row) => {
+      const text = rowText(row);
+      const tolerantBonus = textMatches(text, value) ? 100 : 0;
+
+      return {
+        row,
+        score: scoreRow(row, [value]) + tolerantBonus
+      };
+    })
     .filter(({ row, score }) => score > 0 && findIdField(row))
     .sort((a, b) => b.score - a.score);
 
@@ -365,7 +387,7 @@ app.get("/", (_request, response) => {
   response.json({
     status: "ok",
     service: "limpiafy-respondio-bridge",
-    version: "1.2.0",
+    version: "1.3.0",
     endpoints: ["/health", "/cotizar-respondio"]
   });
 });
@@ -374,7 +396,7 @@ app.get("/health", (_request, response) => {
   response.json({
     status: "ok",
     service: "limpiafy-respondio-bridge",
-    version: "1.2.0"
+    version: "1.3.0"
   });
 });
 
