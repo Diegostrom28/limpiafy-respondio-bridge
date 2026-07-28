@@ -592,7 +592,23 @@ app.post("/cotizar-respondio", async (request, response) => {
     });
   }
 });
+app.post("/debug-respondio", (request, response) => {
+  console.log(
+    "DEBUG RESPOND.IO:",
+    JSON.stringify({
+      headers: request.headers,
+      body: request.body
+    })
+  );
 
+  return response.status(200).json({
+    success: 1,
+    source: "LIMPIAFY_BRIDGE",
+    version: "1.6.1",
+    message: "La solicitud llegó correctamente al puente",
+    receivedBody: request.body
+  });
+});
 try {
   validateEnvironment();
 
