@@ -61,6 +61,24 @@ function isNumericId(value) {
   return /^\d+$/.test(String(value ?? "").trim());
 }
 
+const CITY_ID_ALIASES = new Map([
+  ["bogota", "12688"],
+  ["bogota d.c.", "12688"],
+  ["bogotadc", "12688"]
+]);
+
+function resolveKnownCityAlias(value) {
+  const normalized = compactText(value);
+
+  for (const [name, id] of CITY_ID_ALIASES.entries()) {
+    if (compactText(name) === normalized) {
+      return id;
+    }
+  }
+
+  return null;
+}
+
 function parseCalendar(value) {
   let current = value;
 
@@ -291,39 +309,79 @@ async function resolveCityId(value) {
     return String(value);
   }
 
-  const rows = await callBuscar("DEPARTAMENTOS_CIUDADES", "");
-  console.log("Registros de ciudad encontrados:", rows.length);
-  console.log(
-    "Muestra de ciudad:",
-    JSON.stringify(rows.slice(0, 5))
+  const original = String(value ?? "").trim();
+
+  if (!original) {
+    throw new Error("La ciudad está vacía");
+  }
+
+  const candidates = [
+    original,
+    original.replace(/\uFFFD/g, ""),
+    normalizeText(original),
+    compactText(original)
+  ].filter(Boolean);
+
+  const uniqueCandidates = [...new Set(candidates)];
+
+  for (const candidate of uniqueCandidates) {
+    const rows = await callBuscar("DEPARTAMENTOS_CIUDADES", candidate);
+
+    console.log(
+      `Consulta de ciudad "${candidate}" devolvió:`,
+      rows.length,
+      "registros"
+    );
+
+    console.log(
+      "Muestra de ciudad:",
+      JSON.stringify(rows.slice(0, 5))
+    );
+
+    const ranked = rows
+      .map((row) => {
+        const text = rowText(row);
+        const tolerantBonus = textMatches(text, original) ? 100 : 0;
+
+        return {
+          row,
+          score: scoreRow(row, [original, candidate]) + tolerantBonus
+        };
+      })
+      .filter(({ row, score }) => score > 0 && findIdField(row))
+      .sort((a, b) => b.score - a.score);
+
+    if (ranked.length > 0) {
+      if (
+        ranked.length > 1 &&
+        ranked[0].score === ranked[1].score &&
+        findIdField(ranked[0].row) !== findIdField(ranked[1].row)
+      ) {
+        throw new Error(
+          `La ciudad "${original}" tiene más de una coincidencia`
+        );
+      }
+
+      const id = findIdField(ranked[0].row);
+
+      console.log(`Ciudad resuelta: ${original} -> ${id}`);
+      return id;
+    }
+  }
+
+  const knownAliasId =
+    typeof resolveKnownCityAlias === "function"
+      ? resolveKnownCityAlias(original)
+      : null;
+
+  if (knownAliasId) {
+    console.log(`Ciudad resuelta por alias: ${original} -> ${knownAliasId}`);
+    return knownAliasId;
+  }
+
+  throw new Error(
+    `No se encontró un ID válido para la ciudad "${original}"`
   );
-
-  const ranked = rows
-    .map((row) => {
-      const text = rowText(row);
-      const tolerantBonus = textMatches(text, value) ? 100 : 0;
-
-      return {
-        row,
-        score: scoreRow(row, [value]) + tolerantBonus
-      };
-    })
-    .filter(({ row, score }) => score > 0 && findIdField(row))
-    .sort((a, b) => b.score - a.score);
-
-  if (ranked.length === 0) {
-    throw new Error(`No se encontró un ID válido para la ciudad "${value}"`);
-  }
-
-  if (
-    ranked.length > 1 &&
-    ranked[0].score === ranked[1].score &&
-    findIdField(ranked[0].row) !== findIdField(ranked[1].row)
-  ) {
-    throw new Error(`La ciudad "${value}" tiene más de una coincidencia`);
-  }
-
-  return findIdField(ranked[0].row);
 }
 
 async function resolvePropertyTypeId(value) {
@@ -412,7 +470,7 @@ app.get("/", (_request, response) => {
   response.json({
     status: "ok",
     service: "limpiafy-respondio-bridge",
-    version: "1.4.0",
+    version: "1.6.0",
     endpoints: ["/health", "/cotizar-respondio"]
   });
 });
@@ -421,7 +479,7 @@ app.get("/health", (_request, response) => {
   response.json({
     status: "ok",
     service: "limpiafy-respondio-bridge",
-    version: "1.4.0"
+    version: "1.6.0"
   });
 });
 
