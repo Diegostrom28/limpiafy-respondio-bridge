@@ -36,12 +36,18 @@ function normalizeText(value) {
     .trim();
 }
 
+function compactText(value) {
+  return normalizeText(value).replace(/[^a-z0-9]/g, "");
+}
+
 function isNumericId(value) {
   return /^\d+$/.test(String(value ?? "").trim());
 }
 
 function parseCalendar(value) {
-  if (Array.isArray(value)) return value;
+  if (Array.isArray(value)) {
+    return value;
+  }
 
   if (typeof value !== "string") {
     throw new Error("calendario debe ser un arreglo o un texto JSON válido");
@@ -90,8 +96,13 @@ function validateCalendar(calendar, requiredDays) {
 }
 
 function extractRows(data) {
-  if (!data) return [];
-  if (Array.isArray(data)) return data;
+  if (!data) {
+    return [];
+  }
+
+  if (Array.isArray(data)) {
+    return data;
+  }
 
   if (typeof data === "object") {
     return Object.values(data).filter(
@@ -136,17 +147,33 @@ function rowText(row) {
 
 function scoreRow(row, searchTerms) {
   const text = rowText(row);
+  const compactRow = compactText(text);
   let score = 0;
 
   for (const term of searchTerms.filter(Boolean)) {
     const normalized = normalizeText(term);
-    if (!normalized) continue;
+    const compactTerm = compactText(term);
 
-    if (text === normalized) score += 100;
-    else if (text.includes(normalized)) score += 30;
+    if (!normalized || !compactTerm) {
+      continue;
+    }
+
+    if (text === normalized) {
+      score += 100;
+    } else if (text.includes(normalized)) {
+      score += 30;
+    }
+
+    if (compactRow === compactTerm) {
+      score += 120;
+    } else if (compactRow.includes(compactTerm)) {
+      score += 60;
+    }
 
     for (const word of normalized.split(/\s+/).filter(Boolean)) {
-      if (text.includes(word)) score += 5;
+      if (text.includes(word)) {
+        score += 5;
+      }
     }
   }
 
@@ -187,11 +214,17 @@ async function callBuscar(tipo, valor = "") {
 }
 
 async function resolveCityId(value) {
-  if (isNumericId(value)) return String(value);
+  if (isNumericId(value)) {
+    return String(value);
+  }
 
   const rows = await callBuscar("DEPARTAMENTOS_CIUDADES", String(value));
+
   const ranked = rows
-    .map((row) => ({ row, score: scoreRow(row, [value]) }))
+    .map((row) => ({
+      row,
+      score: scoreRow(row, [value])
+    }))
     .filter(({ row, score }) => score > 0 && findIdField(row))
     .sort((a, b) => b.score - a.score);
 
@@ -211,11 +244,17 @@ async function resolveCityId(value) {
 }
 
 async function resolvePropertyTypeId(value) {
-  if (isNumericId(value)) return String(value);
+  if (isNumericId(value)) {
+    return String(value);
+  }
 
   const rows = await callBuscar("TIPO_INMUEBLE", String(value));
+
   const ranked = rows
-    .map((row) => ({ row, score: scoreRow(row, [value]) }))
+    .map((row) => ({
+      row,
+      score: scoreRow(row, [value])
+    }))
     .filter(({ row, score }) => score > 0 && findIdField(row))
     .sort((a, b) => b.score - a.score);
 
@@ -251,18 +290,29 @@ function expectedPackageCategory(propertyType) {
 }
 
 async function resolvePackageId(value, propertyType) {
-  if (isNumericId(value)) return String(value);
+  if (isNumericId(value)) {
+    return String(value);
+  }
 
   const rows = await callBuscar("TODOS_PAQUETES", "");
   const category = expectedPackageCategory(propertyType);
 
   const ranked = rows
-    .map((row) => ({
-      row,
-      score:
-        scoreRow(row, [value]) +
-        (category && rowText(row).includes(category) ? 50 : 0)
-    }))
+    .map((row) => {
+      const rowNormalizedText = rowText(row);
+
+      return {
+        row,
+        score:
+          scoreRow(row, [value]) +
+          (
+            category &&
+            compactText(rowNormalizedText).includes(compactText(category))
+              ? 50
+              : 0
+          )
+      };
+    })
     .filter(({ row, score }) => score > 0 && findIdField(row))
     .sort((a, b) => b.score - a.score);
 
@@ -370,6 +420,7 @@ app.post("/cotizar-respondio", async (request, response) => {
     const rawBody = await upstreamResponse.text();
 
     let body;
+
     try {
       body = JSON.parse(rawBody);
     } catch {
