@@ -45,21 +45,38 @@ function isNumericId(value) {
 }
 
 function parseCalendar(value) {
-  if (Array.isArray(value)) {
-    return value;
+  let current = value;
+
+  // Respond.io puede enviar el arreglo como JSON serializado una o dos veces.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (Array.isArray(current)) {
+      return current;
+    }
+
+    if (typeof current !== "string") {
+      break;
+    }
+
+    const trimmed = current.trim();
+
+    if (!trimmed) {
+      throw new Error("calendario está vacío");
+    }
+
+    try {
+      current = JSON.parse(trimmed);
+    } catch {
+      throw new Error("calendario no contiene un JSON válido");
+    }
   }
 
-  if (typeof value !== "string") {
-    throw new Error("calendario debe ser un arreglo o un texto JSON válido");
+  if (!Array.isArray(current)) {
+    throw new Error(
+      `calendario debe contener un arreglo; se recibió ${typeof current}`
+    );
   }
 
-  const parsed = JSON.parse(value);
-
-  if (!Array.isArray(parsed)) {
-    throw new Error("calendario debe contener un arreglo");
-  }
-
-  return parsed;
+  return current;
 }
 
 function validateCalendar(calendar, requiredDays) {
@@ -327,6 +344,7 @@ app.get("/", (_request, response) => {
   response.json({
     status: "ok",
     service: "limpiafy-respondio-bridge",
+    version: "1.1.0",
     endpoints: ["/health", "/cotizar-respondio"]
   });
 });
@@ -334,7 +352,8 @@ app.get("/", (_request, response) => {
 app.get("/health", (_request, response) => {
   response.json({
     status: "ok",
-    service: "limpiafy-respondio-bridge"
+    service: "limpiafy-respondio-bridge",
+    version: "1.1.0"
   });
 });
 
@@ -382,7 +401,9 @@ app.post("/cotizar-respondio", async (request, response) => {
       });
     }
 
+    console.log("Calendario recibido:", { tipo: typeof calendario, valor: calendario });
     const parsedCalendar = parseCalendar(calendario);
+    console.log("Calendario convertido:", { esArray: Array.isArray(parsedCalendar), elementos: parsedCalendar.length });
     const validatedCalendar = validateCalendar(parsedCalendar, numberOfDays);
 
     const [cityId, propertyTypeId, packageId] = await Promise.all([
