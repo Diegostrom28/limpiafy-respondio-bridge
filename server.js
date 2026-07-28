@@ -184,24 +184,23 @@ function extractRows(data) {
 }
 
 function findIdField(row) {
-  const idKeys = [
-    "id",
+  const preferredKeys = [
+    "idCiudad",
     "id_ciudad",
     "ciudad_id",
+    "idTipoInmueble",
     "id_tipo_inmueble",
     "tipo_inmueble_id",
+    "idPaquete",
     "id_paquete",
     "paquete_id",
     "prm_ciudad",
     "prm_tipo_inmueble",
     "prm_paquete",
-    "codigo",
-    "code",
-    "value",
-    "valor"
+    "id"
   ];
 
-  for (const key of idKeys) {
+  for (const key of preferredKeys) {
     if (row[key] !== undefined && row[key] !== null && row[key] !== "") {
       const candidate = String(row[key]).trim();
 
@@ -211,9 +210,17 @@ function findIdField(row) {
     }
   }
 
-  // Respaldo genérico: encuentra cualquier propiedad cuyo nombre sugiera
-  // identificador o código y cuyo valor sea numérico.
+  const blockedKeys = new Set([
+    "idDepartamento",
+    "id_departamento",
+    "departamento_id"
+  ]);
+
   for (const [key, value] of Object.entries(row)) {
+    if (blockedKeys.has(key)) {
+      continue;
+    }
+
     if (
       /(id|codigo|code|value|valor)/i.test(key) &&
       value !== undefined &&
@@ -470,7 +477,7 @@ app.get("/", (_request, response) => {
   response.json({
     status: "ok",
     service: "limpiafy-respondio-bridge",
-    version: "1.6.0",
+    version: "1.6.2",
     endpoints: ["/health", "/cotizar-respondio"]
   });
 });
@@ -479,7 +486,7 @@ app.get("/health", (_request, response) => {
   response.json({
     status: "ok",
     service: "limpiafy-respondio-bridge",
-    version: "1.6.0"
+    version: "1.6.2"
   });
 });
 
@@ -592,23 +599,7 @@ app.post("/cotizar-respondio", async (request, response) => {
     });
   }
 });
-app.post("/debug-respondio", (request, response) => {
-  console.log(
-    "DEBUG RESPOND.IO:",
-    JSON.stringify({
-      headers: request.headers,
-      body: request.body
-    })
-  );
 
-  return response.status(200).json({
-    success: 1,
-    source: "LIMPIAFY_BRIDGE",
-    version: "1.6.1",
-    message: "La solicitud llegó correctamente al puente",
-    receivedBody: request.body
-  });
-});
 try {
   validateEnvironment();
 
