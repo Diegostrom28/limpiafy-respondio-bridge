@@ -113,21 +113,39 @@ function validateCalendar(calendar, requiredDays) {
 }
 
 function extractRows(data) {
-  if (!data) {
-    return [];
+  const rows = [];
+  const seen = new Set();
+
+  function visit(value) {
+    if (!value || typeof value !== "object") {
+      return;
+    }
+
+    if (seen.has(value)) {
+      return;
+    }
+
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        visit(item);
+      }
+      return;
+    }
+
+    // Conserva cada objeto como posible registro y sigue recorriendo
+    // sus propiedades para soportar respuestas anidadas.
+    rows.push(value);
+
+    for (const child of Object.values(value)) {
+      visit(child);
+    }
   }
 
-  if (Array.isArray(data)) {
-    return data;
-  }
+  visit(data);
 
-  if (typeof data === "object") {
-    return Object.values(data).filter(
-      (value) => value && typeof value === "object" && !Array.isArray(value)
-    );
-  }
-
-  return [];
+  return rows;
 }
 
 function findIdField(row) {
@@ -236,6 +254,7 @@ async function resolveCityId(value) {
   }
 
   const rows = await callBuscar("DEPARTAMENTOS_CIUDADES", String(value));
+  console.log("Registros de ciudad encontrados:", rows.length);
 
   const ranked = rows
     .map((row) => ({
@@ -266,6 +285,7 @@ async function resolvePropertyTypeId(value) {
   }
 
   const rows = await callBuscar("TIPO_INMUEBLE", String(value));
+  console.log("Registros de tipo de inmueble encontrados:", rows.length);
 
   const ranked = rows
     .map((row) => ({
@@ -312,6 +332,7 @@ async function resolvePackageId(value, propertyType) {
   }
 
   const rows = await callBuscar("TODOS_PAQUETES", "");
+  console.log("Registros de paquetes encontrados:", rows.length);
   const category = expectedPackageCategory(propertyType);
 
   const ranked = rows
@@ -344,7 +365,7 @@ app.get("/", (_request, response) => {
   response.json({
     status: "ok",
     service: "limpiafy-respondio-bridge",
-    version: "1.1.0",
+    version: "1.2.0",
     endpoints: ["/health", "/cotizar-respondio"]
   });
 });
@@ -353,7 +374,7 @@ app.get("/health", (_request, response) => {
   response.json({
     status: "ok",
     service: "limpiafy-respondio-bridge",
-    version: "1.1.0"
+    version: "1.2.0"
   });
 });
 
