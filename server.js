@@ -176,12 +176,33 @@ function findIdField(row) {
     "paquete_id",
     "prm_ciudad",
     "prm_tipo_inmueble",
-    "prm_paquete"
+    "prm_paquete",
+    "codigo",
+    "code",
+    "value",
+    "valor"
   ];
 
   for (const key of idKeys) {
     if (row[key] !== undefined && row[key] !== null && row[key] !== "") {
-      return String(row[key]);
+      const candidate = String(row[key]).trim();
+
+      if (/^\d+$/.test(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  // Respaldo genérico: encuentra cualquier propiedad cuyo nombre sugiera
+  // identificador o código y cuyo valor sea numérico.
+  for (const [key, value] of Object.entries(row)) {
+    if (
+      /(id|codigo|code|value|valor)/i.test(key) &&
+      value !== undefined &&
+      value !== null &&
+      /^\d+$/.test(String(value).trim())
+    ) {
+      return String(value).trim();
     }
   }
 
@@ -272,6 +293,10 @@ async function resolveCityId(value) {
 
   const rows = await callBuscar("DEPARTAMENTOS_CIUDADES", "");
   console.log("Registros de ciudad encontrados:", rows.length);
+  console.log(
+    "Muestra de ciudad:",
+    JSON.stringify(rows.slice(0, 5))
+  );
 
   const ranked = rows
     .map((row) => {
@@ -387,7 +412,7 @@ app.get("/", (_request, response) => {
   response.json({
     status: "ok",
     service: "limpiafy-respondio-bridge",
-    version: "1.3.0",
+    version: "1.4.0",
     endpoints: ["/health", "/cotizar-respondio"]
   });
 });
@@ -396,7 +421,7 @@ app.get("/health", (_request, response) => {
   response.json({
     status: "ok",
     service: "limpiafy-respondio-bridge",
-    version: "1.3.0"
+    version: "1.4.0"
   });
 });
 
