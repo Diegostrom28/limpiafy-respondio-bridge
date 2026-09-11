@@ -11,7 +11,7 @@ const {
   LIMPIAFY_X_KEY
 } = process.env;
 
-const VERSION = "2.2.2";
+const VERSION = "2.2.3";
 
 function validateEnvironment() {
   const missing = [];
@@ -475,59 +475,184 @@ app.post("/consultar", async (req, res) => {
   } catch (error) { return bridgeError(res, error); }
 });
 
+function firstClientIdentifier(body = {}) {
+  const candidates = [
+    ["dni_cliente", body.dni_cliente],
+    ["numero_documento", body.numero_documento],
+    ["celular", body.celular],
+    ["email", body.email],
+    ["valor", body.valor]
+  ];
+
+  for (const [key, raw] of candidates) {
+    const value = raw === undefined || raw === null ? "" : String(raw).trim();
+    if (!value) continue;
+    // Para los endpoints de direcciones el backend historicamente trabaja mejor
+    // con dni_cliente cuando recibimos numero_documento.
+    if (key === "numero_documento") return { dni_cliente: value };
+    return { [key]: value };
+  }
+  throw new Error("Falta identificador del Usuario (documento, celular o correo)");
+}
+
+function pickAllowed(body = {}, keys = []) {
+  const out = {};
+  for (const key of keys) {
+    const value = body[key];
+    if (value !== undefined && value !== null && value !== "") out[key] = value;
+  }
+  return out;
+}
+
+function normalizeAddressAliases(input = {}) {
+  const body = { ...input };
+
+  if (body.informacion_datos_llegada === undefined && body.informacion_llegada !== undefined) {
+    body.informacion_datos_llegada = body.informacion_llegada;
+  }
+  if (body.nombre_edificio === undefined && body.edificio !== undefined) {
+    body.nombre_edificio = body.edificio;
+  }
+  if (body.detalle_piso === undefined && body.piso !== undefined) {
+    body.detalle_piso = body.piso;
+  }
+  if (body.cantidad_m2 === undefined && body.m2 !== undefined) body.cantidad_m2 = body.m2;
+  if (body.cantidad_banos === undefined && body.banos !== undefined) body.cantidad_banos = body.banos;
+  if (body.cantidad_pisos === undefined && body.pisos !== undefined) body.cantidad_pisos = body.pisos;
+
+  delete body.informacion_llegada;
+  delete body.edificio;
+  delete body.piso;
+  delete body.m2;
+  delete body.banos;
+  delete body.pisos;
+
+  return removeEmptyFields(body);
+}
+
 app.post("/gestionar-cuenta", async (req, res) => {
   try {
     const operacion = String(req.body?.operacion ?? "").trim().toUpperCase();
-    const rutas = {
-      CREAR_SOLICITAR_OTP: "agenteIA/crear-usuario",
-      CREAR_CONFIRMAR_OTP: "agenteIA/confirmar-crear-usuario",
-      ACTUALIZAR_SOLICITAR_OTP: "agenteIA/solicitar-actualizacion-usuario",
-      ACTUALIZAR_CONFIRMAR_OTP: "agenteIA/confirmar-actualizacion-usuario"
-    };
-    const path = rutas[operacion];
-    if (!path) throw new Error(`operacion inválida. Usa: ${Object.keys(rutas).join(", ")}`);
-
-    const body = removeEmptyFields({ ...req.body });
+    let body = removeEmptyFields({ ...req.body });
     delete body.operacion;
-
-    if (["CREAR_SOLICITAR_OTP", "ACTUALIZAR_CONFIRMAR_OTP"].includes(operacion) && body.tipo_documento !== undefined) {
-      body.tipo_documento = resolveDocumentTypeId(body.tipo_documento);
-    }
 
     if (operacion === "CREAR_SOLICITAR_OTP") {
       const required = ["tipo_cliente", "tipo_documento", "numero_documento", "email", "celular"];
       const missing = required.filter((key) => body[key] === undefined || body[key] === null || String(body[key]).trim() === "");
-      if (missing.length) {
-        throw new Error(`Faltan campos para crear Usuario: ${missing.join(", ")}`);
-      }
+      if (missing.length) throw new Error(`Faltan campos para crear Usuario: ${missing.join(", ")}`);
+
+      body.tipo_documento = resolveDocumentTypeId(body.tipo_documento);
+      body.tipo_cliente = String(body.tipo_cliente).trim().toUpperCase();
+
+      const payload = pickAllowed(body, [
+        "tipo_cliente", "tipo_documento", "numero_documento", "nombres", "apellidos",
+        "razon_social", "actividad_comercial", "email", "celular", "email2", "celular2",
+        "canal_origen", "envio_notificaciones_wsp"
+      ]);
+
+      // Valores operativos esperados por el flujo de Agente IA.
+      if (payload.canal_origen === undefined) payload.canal_origen = "AGENTE_IA";
+      if (payload.envio_notificaciones_wsp === undefined) payload.envio_notificaciones_wsp = 1;
+
+      if (payload.tipo_cliente === "PERSONA NATURAL") delete payload.razon_social;
+
+      console.log("Gestion cuenta CREAR_SOLICITAR_OTP normalizado:", JSON.stringify(payload));
+      return res.json(await proxyToLimpiafy("agenteIA/crear-usuario", payload));
     }
 
-    return res.json(await proxyToLimpiafy(path, body));
+    if (operacion === "CREAR_CONFIRMAR_OTP") {
+      const payload = pickAllowed(body, ["numero_documento", "otp"]);
+      if (!payload.numero_documento || !payload.otp) throw new Error("Faltan numero_documento u otp para confirmar Usuario");
+      return res.json(await proxyToLimpiafy("agenteIA/confirmar-crear-usuario", payload));
+    }
+
+    if (operacion === "ACTUALIZAR_SOLICITAR_OTP") {
+      const identifier = firstClientIdentifier(body);
+      return res.json(await proxyToLimpiafy("agenteIA/solicitar-actualizacion-usuario", identifier));
+    }
+
+    if (operacion === "ACTUALIZAR_CONFIRMAR_OTP") {
+      if (!body.otp) throw new Error("Falta otp para confirmar actualización de Usuario");
+      if (body.tipo_documento !== undefined) body.tipo_documento = resolveDocumentTypeId(body.tipo_documento);
+      const identifier = firstClientIdentifier(body);
+      const payload = {
+        ...identifier,
+        ...pickAllowed(body, [
+          "otp", "tipo_documento", "tipo_cliente", "dni_cliente", "actividad_comercial",
+          "canal_origen", "envio_notificaciones_wsp", "aplicar_rtf", "nombres", "apellidos",
+          "razon_social", "email", "celular", "email2", "celular2"
+        ])
+      };
+      return res.json(await proxyToLimpiafy("agenteIA/confirmar-actualizacion-usuario", payload));
+    }
+
+    throw new Error("operacion inválida. Usa: CREAR_SOLICITAR_OTP, CREAR_CONFIRMAR_OTP, ACTUALIZAR_SOLICITAR_OTP o ACTUALIZAR_CONFIRMAR_OTP");
   } catch (error) { return bridgeError(res, error); }
 });
 
 app.post("/gestionar-direcciones", async (req, res) => {
   try {
     const operacion = String(req.body?.operacion ?? "").trim().toUpperCase();
-    const rutas = {
-      LISTAR: "agenteIA/listar-direcciones",
-      CREAR_SOLICITAR_OTP: "agenteIA/solicitar-crear-direccion",
-      CREAR_CONFIRMAR_OTP: "agenteIA/confirmar-crear-direccion",
-      ACTUALIZAR_SOLICITAR_OTP: "agenteIA/solicitar-actualizar-direccion",
-      ACTUALIZAR_CONFIRMAR_OTP: "agenteIA/confirmar-actualizar-direccion"
-    };
-    const path = rutas[operacion];
-    if (!path) throw new Error(`operacion inválida. Usa: ${Object.keys(rutas).join(", ")}`);
-
-    let body = removeEmptyFields({ ...req.body });
+    let body = normalizeAddressAliases(removeEmptyFields({ ...req.body }));
     delete body.operacion;
 
-    if (["CREAR_CONFIRMAR_OTP", "ACTUALIZAR_CONFIRMAR_OTP"].includes(operacion)) {
-      if (body.prm_ciudad) body.prm_ciudad = Number(await resolveCityId(body.prm_ciudad));
-      if (body.prm_tipo_inmueble) body.prm_tipo_inmueble = Number(await resolvePropertyTypeId(body.prm_tipo_inmueble));
+    if (operacion === "LISTAR") {
+      const identifier = firstClientIdentifier(body);
+      return res.json(await proxyToLimpiafy("agenteIA/listar-direcciones", identifier));
     }
 
-    return res.json(await proxyToLimpiafy(path, body));
+    if (operacion === "CREAR_SOLICITAR_OTP") {
+      // Este endpoint SOLO necesita identificar al Usuario. No reenviamos ciudad,
+      // inmueble o dirección todavía; esos datos pertenecen a la confirmación OTP.
+      const identifier = firstClientIdentifier(body);
+      console.log("Gestion direccion CREAR_SOLICITAR_OTP normalizado:", JSON.stringify(identifier));
+      return res.json(await proxyToLimpiafy("agenteIA/solicitar-crear-direccion", identifier));
+    }
+
+    if (operacion === "CREAR_CONFIRMAR_OTP") {
+      const identifier = firstClientIdentifier(body);
+      const required = ["otp", "prm_ciudad", "prm_tipo_inmueble", "nombre_referencia", "direccion"];
+      const missing = required.filter((key) => body[key] === undefined || body[key] === null || String(body[key]).trim() === "");
+      if (missing.length) throw new Error(`Faltan campos para confirmar dirección: ${missing.join(", ")}`);
+
+      const payload = {
+        ...identifier,
+        ...pickAllowed(body, [
+          "otp", "prm_ciudad", "prm_tipo_inmueble", "nombre_referencia", "direccion",
+          "informacion_datos_llegada", "nombre_edificio", "detalle_piso", "cantidad_m2",
+          "cantidad_banos", "cantidad_pisos", "minuta", "coordenada_longitud", "coordenada_latitud"
+        ])
+      };
+      payload.prm_ciudad = Number(await resolveCityId(payload.prm_ciudad));
+      payload.prm_tipo_inmueble = Number(await resolvePropertyTypeId(payload.prm_tipo_inmueble));
+      return res.json(await proxyToLimpiafy("agenteIA/confirmar-crear-direccion", payload));
+    }
+
+    if (operacion === "ACTUALIZAR_SOLICITAR_OTP") {
+      if (!body.id_direccion) throw new Error("Falta id_direccion para solicitar actualización");
+      const identifier = firstClientIdentifier(body);
+      const payload = { ...identifier, id_direccion: Number(body.id_direccion) };
+      return res.json(await proxyToLimpiafy("agenteIA/solicitar-actualizar-direccion", payload));
+    }
+
+    if (operacion === "ACTUALIZAR_CONFIRMAR_OTP") {
+      if (!body.id_direccion || !body.otp) throw new Error("Faltan id_direccion u otp para confirmar actualización");
+      const identifier = firstClientIdentifier(body);
+      const payload = {
+        ...identifier,
+        ...pickAllowed(body, [
+          "otp", "prm_ciudad", "prm_tipo_inmueble", "estado", "nombre_referencia", "direccion",
+          "informacion_datos_llegada", "nombre_edificio", "detalle_piso", "cantidad_m2",
+          "cantidad_banos", "cantidad_pisos", "minuta", "coordenada_longitud", "coordenada_latitud"
+        ]),
+        id_direccion: Number(body.id_direccion)
+      };
+      if (payload.prm_ciudad) payload.prm_ciudad = Number(await resolveCityId(payload.prm_ciudad));
+      if (payload.prm_tipo_inmueble) payload.prm_tipo_inmueble = Number(await resolvePropertyTypeId(payload.prm_tipo_inmueble));
+      return res.json(await proxyToLimpiafy("agenteIA/confirmar-actualizar-direccion", payload));
+    }
+
+    throw new Error("operacion inválida. Usa: LISTAR, CREAR_SOLICITAR_OTP, CREAR_CONFIRMAR_OTP, ACTUALIZAR_SOLICITAR_OTP o ACTUALIZAR_CONFIRMAR_OTP");
   } catch (error) { return bridgeError(res, error); }
 });
 
