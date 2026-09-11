@@ -11,7 +11,7 @@ const {
   LIMPIAFY_X_KEY
 } = process.env;
 
-const VERSION = "2.1.1";
+const VERSION = "2.2.0";
 
 function validateEnvironment() {
   const missing = [];
@@ -321,6 +321,7 @@ app.get("/", (_req, res) => res.json({
   environment: "production",
   endpoints: [
     "/health", "/debug-respondio",
+    "/consultar", "/gestionar-cuenta", "/gestionar-direcciones", "/modificar-reserva",
     "/consultar-paquetes", "/consultar-detalle-paquete", "/consultar-ciudades",
     "/consultar-tipos-inmueble", "/consultar-cliente", "/consultar-direcciones", "/consultar-cupon",
     "/estado-servicio", "/disponibilidad-partner", "/cotizar-respondio", "/pagar",
@@ -340,6 +341,97 @@ app.get("/health", (_req, res) => res.json({
 app.post("/debug-respondio", (req, res) => {
   console.log("DEBUG RESPOND.IO:", JSON.stringify({ headers: req.headers, body: req.body }));
   res.json({ success: 1, source: "LIMPIAFY_BRIDGE", version: VERSION, receivedBody: req.body });
+});
+
+
+function removeEmptyFields(input = {}) {
+  return Object.fromEntries(
+    Object.entries(input).filter(([, value]) => value !== undefined && value !== null && value !== "")
+  );
+}
+
+app.post("/consultar", async (req, res) => {
+  try {
+    const operacion = String(req.body?.operacion ?? "").trim().toUpperCase();
+    const valor = req.body?.valor ?? req.body?.ciudad ?? req.body?.cupon ?? req.body?.prm_paquete ?? "";
+
+    const tipos = {
+      PAQUETES: "TODOS_PAQUETES",
+      DETALLE_PAQUETE: "DETALLE_PAQUETE",
+      CIUDAD: "DEPARTAMENTOS_CIUDADES",
+      CLIENTE: "CLIENTE_EXISTE",
+      DIRECCIONES: "DIRECCIONES_CLIENTE",
+      CUPON: "CONSULTAR_CUPON",
+      TIPO_INMUEBLE: "TIPO_INMUEBLE"
+    };
+
+    const tipo = tipos[operacion];
+    if (!tipo) {
+      throw new Error(`operacion inválida. Usa: ${Object.keys(tipos).join(", ")}`);
+    }
+
+    const valorFinal = ["PAQUETES", "TIPO_INMUEBLE"].includes(operacion) ? "" : valor;
+    return res.json(await buscar(tipo, valorFinal));
+  } catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/gestionar-cuenta", async (req, res) => {
+  try {
+    const operacion = String(req.body?.operacion ?? "").trim().toUpperCase();
+    const rutas = {
+      CREAR_SOLICITAR_OTP: "agenteIA/crear-usuario",
+      CREAR_CONFIRMAR_OTP: "agenteIA/confirmar-crear-usuario",
+      ACTUALIZAR_SOLICITAR_OTP: "agenteIA/solicitar-actualizacion-usuario",
+      ACTUALIZAR_CONFIRMAR_OTP: "agenteIA/confirmar-actualizacion-usuario"
+    };
+    const path = rutas[operacion];
+    if (!path) throw new Error(`operacion inválida. Usa: ${Object.keys(rutas).join(", ")}`);
+
+    const body = removeEmptyFields({ ...req.body });
+    delete body.operacion;
+    return res.json(await proxyToLimpiafy(path, body));
+  } catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/gestionar-direcciones", async (req, res) => {
+  try {
+    const operacion = String(req.body?.operacion ?? "").trim().toUpperCase();
+    const rutas = {
+      LISTAR: "agenteIA/listar-direcciones",
+      CREAR_SOLICITAR_OTP: "agenteIA/solicitar-crear-direccion",
+      CREAR_CONFIRMAR_OTP: "agenteIA/confirmar-crear-direccion",
+      ACTUALIZAR_SOLICITAR_OTP: "agenteIA/solicitar-actualizar-direccion",
+      ACTUALIZAR_CONFIRMAR_OTP: "agenteIA/confirmar-actualizar-direccion"
+    };
+    const path = rutas[operacion];
+    if (!path) throw new Error(`operacion inválida. Usa: ${Object.keys(rutas).join(", ")}`);
+
+    let body = removeEmptyFields({ ...req.body });
+    delete body.operacion;
+
+    if (["CREAR_CONFIRMAR_OTP", "ACTUALIZAR_CONFIRMAR_OTP"].includes(operacion)) {
+      if (body.prm_ciudad) body.prm_ciudad = Number(await resolveCityId(body.prm_ciudad));
+      if (body.prm_tipo_inmueble) body.prm_tipo_inmueble = Number(await resolvePropertyTypeId(body.prm_tipo_inmueble));
+    }
+
+    return res.json(await proxyToLimpiafy(path, body));
+  } catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/modificar-reserva", async (req, res) => {
+  try {
+    const operacion = String(req.body?.operacion ?? "").trim().toUpperCase();
+    const rutas = {
+      SIMULAR: "agenteIA/simular-modificacion-reserva",
+      CONFIRMAR: "agenteIA/confirmar-modificacion-reserva"
+    };
+    const path = rutas[operacion];
+    if (!path) throw new Error(`operacion inválida. Usa: ${Object.keys(rutas).join(", ")}`);
+
+    const body = removeEmptyFields({ ...req.body });
+    delete body.operacion;
+    return res.json(await proxyToLimpiafy(path, body));
+  } catch (error) { return bridgeError(res, error); }
 });
 
 app.post("/consultar-paquetes", async (_req, res) => {
