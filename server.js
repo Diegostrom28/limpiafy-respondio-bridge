@@ -11,7 +11,7 @@ const {
   LIMPIAFY_X_KEY
 } = process.env;
 
-const VERSION = "2.2.3";
+const VERSION = "2.2.4";
 
 function validateEnvironment() {
   const missing = [];
@@ -49,28 +49,55 @@ function isNumericId(value) {
   return /^\d+$/.test(String(value ?? "").trim());
 }
 
-function resolveDocumentTypeId(value) {
+async function resolveDocumentTypeId(value) {
   if (isNumericId(value)) return Number(value);
 
   const normalized = compactText(value);
-
-  // La colección oficial usa tipo_documento=1 en el ejemplo de PERSONA NATURAL.
-  // Aceptamos las variantes conversacionales habituales de Cédula de Ciudadanía.
-  const aliases = new Map([
-    ["cc", 1],
-    ["cedula", 1],
-    ["cedulaciudadania", 1],
-    ["ceduladeciudadania", 1],
-    ["ceduladeciudadania", 1]
+  const aliases = new Set([
+    "cc", "cedula", "cedulaciudadania", "ceduladeciudadania"
   ]);
 
-  const resolved = aliases.get(normalized);
-  if (resolved) {
-    console.log(`Tipo de documento resuelto: ${value} -> ${resolved}`);
-    return resolved;
+  // Intento 1: resolver contra tablas de parametros si el backend expone alguno
+  // de estos tipos de busqueda. Si no existe, seguimos con el fallback seguro.
+  const searchTypes = [
+    "TIPO_IDENTIFICACION",
+    "TIPO_DOCUMENTO",
+    "TIPOS_IDENTIFICACION",
+    "PRM_TIPO_IDENTIFICACION"
+  ];
+
+  for (const tipo of searchTypes) {
+    try {
+      const response = await buscar(tipo, String(value ?? ""));
+      const rows = objectRows(response);
+      const ranked = rows.map((row) => ({
+        id: pickNumeric(row, [
+          "id", "idTipoIdentificacion", "id_tipo_identificacion",
+          "prm_tipo_identificacion", "tipo_identificacion_id"
+        ]),
+        score: scoreText(
+          row.nombre ?? row.descripcion ?? row.tipo_identificacion ??
+          row.nombreTipoIdentificacion ?? row.nombre_tipo_identificacion ?? "",
+          value
+        )
+      })).filter(x => x.id && x.score > 0).sort((a,b) => b.score-a.score);
+
+      if (ranked.length) {
+        console.log(`Tipo de documento resuelto por ${tipo}: ${value} -> ${ranked[0].id}`);
+        return Number(ranked[0].id);
+      }
+    } catch (error) {
+      console.log(`Busqueda ${tipo} no disponible para tipo_documento`);
+    }
   }
 
-  throw new Error(`tipo_documento no reconocido: "${value}". Envía un ID numérico o Cédula de Ciudadanía.`);
+  // Fallback documentado por la coleccion suministrada para persona natural.
+  if (aliases.has(normalized)) {
+    console.log(`Tipo de documento resuelto por alias: ${value} -> 1`);
+    return 1;
+  }
+
+  throw new Error(`tipo_documento no reconocido: "${value}". Envia un ID numerico o Cedula de Ciudadania.`);
 }
 
 function addHours(time, hoursToAdd) {
@@ -475,24 +502,51 @@ app.post("/consultar", async (req, res) => {
   } catch (error) { return bridgeError(res, error); }
 });
 
-function firstClientIdentifier(body = {}) {
-  const candidates = [
-    ["dni_cliente", body.dni_cliente],
-    ["numero_documento", body.numero_documento],
-    ["celular", body.celular],
-    ["email", body.email],
-    ["valor", body.valor]
-  ];
-
-  for (const [key, raw] of candidates) {
+function clientIdentifierCandidates(body = {}) {
+  const out = [];
+  const add = (key, raw) => {
     const value = raw === undefined || raw === null ? "" : String(raw).trim();
-    if (!value) continue;
-    // Para los endpoints de direcciones el backend historicamente trabaja mejor
-    // con dni_cliente cuando recibimos numero_documento.
-    if (key === "numero_documento") return { dni_cliente: value };
-    return { [key]: value };
+    if (!value) return;
+    const sig = `${key}:${value}`;
+    if (!out.some(item => item.sig === sig)) out.push({ sig, payload: { [key]: value } });
+  };
+
+  // Respetar primero el identificador que realmente envio Respond.io.
+  add("dni_cliente", body.dni_cliente);
+  add("numero_documento", body.numero_documento);
+  add("celular", body.celular);
+  add("email", body.email);
+  add("valor", body.valor);
+
+  // Para documento, agregamos variantes compatibles con los endpoints historicos.
+  const doc = String(body.numero_documento ?? body.dni_cliente ?? "").trim();
+  if (doc) {
+    add("numero_documento", doc);
+    add("dni_cliente", doc);
+    add("valor", doc);
   }
-  throw new Error("Falta identificador del Usuario (documento, celular o correo)");
+
+  if (!out.length) throw new Error("Falta identificador del Usuario (documento, celular o correo)");
+  return out.map(x => x.payload);
+}
+
+function firstClientIdentifier(body = {}) {
+  return clientIdentifierCandidates(body)[0];
+}
+
+async function proxyWithIdentifierFallback(path, body = {}) {
+  const candidates = clientIdentifierCandidates(body);
+  let lastError;
+  for (const identifier of candidates) {
+    try {
+      console.log(`Intentando ${path} con identificador:`, JSON.stringify(identifier));
+      return await proxyToLimpiafy(path, identifier);
+    } catch (error) {
+      lastError = error;
+      console.log(`Fallo ${path} con identificador ${JSON.stringify(identifier)}: ${error?.message}`);
+    }
+  }
+  throw lastError ?? new Error(`No fue posible ejecutar ${path}`);
 }
 
 function pickAllowed(body = {}, keys = []) {
@@ -541,18 +595,15 @@ app.post("/gestionar-cuenta", async (req, res) => {
       const missing = required.filter((key) => body[key] === undefined || body[key] === null || String(body[key]).trim() === "");
       if (missing.length) throw new Error(`Faltan campos para crear Usuario: ${missing.join(", ")}`);
 
-      body.tipo_documento = resolveDocumentTypeId(body.tipo_documento);
+      body.tipo_documento = await resolveDocumentTypeId(body.tipo_documento);
       body.tipo_cliente = String(body.tipo_cliente).trim().toUpperCase();
 
+      // Enviar el payload minimo documentado. Evitamos campos opcionales que
+      // puedan tener validaciones adicionales en produccion.
       const payload = pickAllowed(body, [
-        "tipo_cliente", "tipo_documento", "numero_documento", "nombres", "apellidos",
-        "razon_social", "actividad_comercial", "email", "celular", "email2", "celular2",
-        "canal_origen", "envio_notificaciones_wsp"
+        "tipo_cliente", "tipo_documento", "numero_documento",
+        "nombres", "apellidos", "razon_social", "email", "celular"
       ]);
-
-      // Valores operativos esperados por el flujo de Agente IA.
-      if (payload.canal_origen === undefined) payload.canal_origen = "AGENTE_IA";
-      if (payload.envio_notificaciones_wsp === undefined) payload.envio_notificaciones_wsp = 1;
 
       if (payload.tipo_cliente === "PERSONA NATURAL") delete payload.razon_social;
 
@@ -573,7 +624,7 @@ app.post("/gestionar-cuenta", async (req, res) => {
 
     if (operacion === "ACTUALIZAR_CONFIRMAR_OTP") {
       if (!body.otp) throw new Error("Falta otp para confirmar actualización de Usuario");
-      if (body.tipo_documento !== undefined) body.tipo_documento = resolveDocumentTypeId(body.tipo_documento);
+      if (body.tipo_documento !== undefined) body.tipo_documento = await resolveDocumentTypeId(body.tipo_documento);
       const identifier = firstClientIdentifier(body);
       const payload = {
         ...identifier,
@@ -604,9 +655,8 @@ app.post("/gestionar-direcciones", async (req, res) => {
     if (operacion === "CREAR_SOLICITAR_OTP") {
       // Este endpoint SOLO necesita identificar al Usuario. No reenviamos ciudad,
       // inmueble o dirección todavía; esos datos pertenecen a la confirmación OTP.
-      const identifier = firstClientIdentifier(body);
-      console.log("Gestion direccion CREAR_SOLICITAR_OTP normalizado:", JSON.stringify(identifier));
-      return res.json(await proxyToLimpiafy("agenteIA/solicitar-crear-direccion", identifier));
+      console.log("Gestion direccion CREAR_SOLICITAR_OTP recibido:", JSON.stringify(body));
+      return res.json(await proxyWithIdentifierFallback("agenteIA/solicitar-crear-direccion", body));
     }
 
     if (operacion === "CREAR_CONFIRMAR_OTP") {
@@ -743,7 +793,7 @@ app.post("/pagar", async (req, res) => {
 app.post("/crear-usuario", async (req, res) => {
   try {
     const body = removeEmptyFields({ ...req.body });
-    if (body.tipo_documento !== undefined) body.tipo_documento = resolveDocumentTypeId(body.tipo_documento);
+    if (body.tipo_documento !== undefined) body.tipo_documento = await resolveDocumentTypeId(body.tipo_documento);
     return res.json(await proxyToLimpiafy("agenteIA/crear-usuario", body));
   } catch (error) { return bridgeError(res, error); }
 });
@@ -761,7 +811,7 @@ app.post("/solicitar-actualizacion-usuario", async (req, res) => {
 app.post("/confirmar-actualizacion-usuario", async (req, res) => {
   try {
     const body = removeEmptyFields({ ...req.body });
-    if (body.tipo_documento !== undefined) body.tipo_documento = resolveDocumentTypeId(body.tipo_documento);
+    if (body.tipo_documento !== undefined) body.tipo_documento = await resolveDocumentTypeId(body.tipo_documento);
     return res.json(await proxyToLimpiafy("agenteIA/confirmar-actualizacion-usuario", body));
   } catch (error) { return bridgeError(res, error); }
 });
