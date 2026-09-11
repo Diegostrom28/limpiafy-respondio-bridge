@@ -11,7 +11,7 @@ const {
   LIMPIAFY_X_KEY
 } = process.env;
 
-const VERSION = "2.1.0";
+const VERSION = "2.1.1";
 
 function validateEnvironment() {
   const missing = [];
@@ -359,7 +359,125 @@ app.post("/consultar-tipos-inmueble", async (_req, res) => {
   catch (error) { return bridgeError(res, error); }
 });
 
-app.post("/consultar-detalle-paquete", async (req, res) => {\n  try {\n    const valor = req.body?.prm_paquete ?? req.body?.valor ?? "";\n    return res.json(await buscar("DETALLE_PAQUETE", valor));\n  } catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/consultar-cliente", async (req, res) => {\n  try {\n    const valor = req.body?.valor ?? req.body?.dni_cliente ?? req.body?.celular ?? req.body?.email ?? "";\n    return res.json(await buscar("CLIENTE_EXISTE", valor));\n  } catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/consultar-direcciones", async (req, res) => {\n  try {\n    const valor = req.body?.valor ?? req.body?.dni_cliente ?? req.body?.celular ?? req.body?.email ?? "";\n    return res.json(await buscar("DIRECCIONES_CLIENTE", valor));\n  } catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/consultar-cupon", async (req, res) => {\n  try {\n    const valor = req.body?.cupon ?? req.body?.valor ?? "";\n    return res.json(await buscar("CONSULTAR_CUPON", valor));\n  } catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/estado-servicio", async (req, res) => {\n  try { return res.json(await proxyToLimpiafy("agenteIA/estado-servicio", req.body)); }\n  catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/disponibilidad-partner", async (req, res) => {\n  try {\n    const result = await proxyToLimpiafy("agenteIA/disponibilidad-partner", req.body, async (body) => {\n      if (!body.prm_ciudad) throw new Error("Falta prm_ciudad");\n      body.prm_ciudad = Number(await resolveCityId(body.prm_ciudad));\n      if (body.prm_paquete) body.prm_paquete = Number(await resolvePackageId(body.prm_paquete, body.prm_tipo_inmueble ?? ""));\n      body.calendario = normalizeCalendar(body.calendario);\n      return body;\n    });\n    return res.json(result);\n  } catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/pagar", async (req, res) => {\n  try { return res.json(await proxyToLimpiafy("agenteIA/pagar", req.body)); }\n  catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/crear-usuario", async (req, res) => {\n  try { return res.json(await proxyToLimpiafy("agenteIA/crear-usuario", req.body)); }\n  catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/confirmar-crear-usuario", async (req, res) => {\n  try { return res.json(await proxyToLimpiafy("agenteIA/confirmar-crear-usuario", req.body)); }\n  catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/solicitar-actualizacion-usuario", async (req, res) => {\n  try { return res.json(await proxyToLimpiafy("agenteIA/solicitar-actualizacion-usuario", req.body)); }\n  catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/confirmar-actualizacion-usuario", async (req, res) => {\n  try { return res.json(await proxyToLimpiafy("agenteIA/confirmar-actualizacion-usuario", req.body)); }\n  catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/listar-direcciones", async (req, res) => {\n  try { return res.json(await proxyToLimpiafy("agenteIA/listar-direcciones", req.body)); }\n  catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/solicitar-crear-direccion", async (req, res) => {\n  try { return res.json(await proxyToLimpiafy("agenteIA/solicitar-crear-direccion", req.body)); }\n  catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/confirmar-crear-direccion", async (req, res) => {\n  try {\n    const result = await proxyToLimpiafy("agenteIA/confirmar-crear-direccion", req.body, async (body) => {\n      if (body.prm_ciudad) body.prm_ciudad = Number(await resolveCityId(body.prm_ciudad));\n      if (body.prm_tipo_inmueble) body.prm_tipo_inmueble = Number(await resolvePropertyTypeId(body.prm_tipo_inmueble));\n      return body;\n    });\n    return res.json(result);\n  } catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/solicitar-actualizar-direccion", async (req, res) => {\n  try { return res.json(await proxyToLimpiafy("agenteIA/solicitar-actualizar-direccion", req.body)); }\n  catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/confirmar-actualizar-direccion", async (req, res) => {\n  try {\n    const result = await proxyToLimpiafy("agenteIA/confirmar-actualizar-direccion", req.body, async (body) => {\n      if (body.prm_ciudad) body.prm_ciudad = Number(await resolveCityId(body.prm_ciudad));\n      if (body.prm_tipo_inmueble) body.prm_tipo_inmueble = Number(await resolvePropertyTypeId(body.prm_tipo_inmueble));\n      return body;\n    });\n    return res.json(result);\n  } catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/simular-modificacion-reserva", async (req, res) => {\n  try { return res.json(await proxyToLimpiafy("agenteIA/simular-modificacion-reserva", req.body)); }\n  catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/confirmar-modificacion-reserva", async (req, res) => {\n  try { return res.json(await proxyToLimpiafy("agenteIA/confirmar-modificacion-reserva", req.body)); }\n  catch (error) { return bridgeError(res, error); }\n});\n\napp.post("/cotizar-respondio", async (req, res) => {
+app.post("/consultar-detalle-paquete", async (req, res) => {
+  try {
+    const valor = req.body?.prm_paquete ?? req.body?.valor ?? "";
+    return res.json(await buscar("DETALLE_PAQUETE", valor));
+  } catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/consultar-cliente", async (req, res) => {
+  try {
+    const valor = req.body?.valor ?? req.body?.dni_cliente ?? req.body?.celular ?? req.body?.email ?? "";
+    return res.json(await buscar("CLIENTE_EXISTE", valor));
+  } catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/consultar-direcciones", async (req, res) => {
+  try {
+    const valor = req.body?.valor ?? req.body?.dni_cliente ?? req.body?.celular ?? req.body?.email ?? "";
+    return res.json(await buscar("DIRECCIONES_CLIENTE", valor));
+  } catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/consultar-cupon", async (req, res) => {
+  try {
+    const valor = req.body?.cupon ?? req.body?.valor ?? "";
+    return res.json(await buscar("CONSULTAR_CUPON", valor));
+  } catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/estado-servicio", async (req, res) => {
+  try { return res.json(await proxyToLimpiafy("agenteIA/estado-servicio", req.body)); }
+  catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/disponibilidad-partner", async (req, res) => {
+  try {
+    const result = await proxyToLimpiafy("agenteIA/disponibilidad-partner", req.body, async (body) => {
+      if (!body.prm_ciudad) throw new Error("Falta prm_ciudad");
+      body.prm_ciudad = Number(await resolveCityId(body.prm_ciudad));
+      if (body.prm_paquete) body.prm_paquete = Number(await resolvePackageId(body.prm_paquete, body.prm_tipo_inmueble ?? ""));
+      body.calendario = normalizeCalendar(body.calendario);
+      return body;
+    });
+    return res.json(result);
+  } catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/pagar", async (req, res) => {
+  try { return res.json(await proxyToLimpiafy("agenteIA/pagar", req.body)); }
+  catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/crear-usuario", async (req, res) => {
+  try { return res.json(await proxyToLimpiafy("agenteIA/crear-usuario", req.body)); }
+  catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/confirmar-crear-usuario", async (req, res) => {
+  try { return res.json(await proxyToLimpiafy("agenteIA/confirmar-crear-usuario", req.body)); }
+  catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/solicitar-actualizacion-usuario", async (req, res) => {
+  try { return res.json(await proxyToLimpiafy("agenteIA/solicitar-actualizacion-usuario", req.body)); }
+  catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/confirmar-actualizacion-usuario", async (req, res) => {
+  try { return res.json(await proxyToLimpiafy("agenteIA/confirmar-actualizacion-usuario", req.body)); }
+  catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/listar-direcciones", async (req, res) => {
+  try { return res.json(await proxyToLimpiafy("agenteIA/listar-direcciones", req.body)); }
+  catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/solicitar-crear-direccion", async (req, res) => {
+  try { return res.json(await proxyToLimpiafy("agenteIA/solicitar-crear-direccion", req.body)); }
+  catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/confirmar-crear-direccion", async (req, res) => {
+  try {
+    const result = await proxyToLimpiafy("agenteIA/confirmar-crear-direccion", req.body, async (body) => {
+      if (body.prm_ciudad) body.prm_ciudad = Number(await resolveCityId(body.prm_ciudad));
+      if (body.prm_tipo_inmueble) body.prm_tipo_inmueble = Number(await resolvePropertyTypeId(body.prm_tipo_inmueble));
+      return body;
+    });
+    return res.json(result);
+  } catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/solicitar-actualizar-direccion", async (req, res) => {
+  try { return res.json(await proxyToLimpiafy("agenteIA/solicitar-actualizar-direccion", req.body)); }
+  catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/confirmar-actualizar-direccion", async (req, res) => {
+  try {
+    const result = await proxyToLimpiafy("agenteIA/confirmar-actualizar-direccion", req.body, async (body) => {
+      if (body.prm_ciudad) body.prm_ciudad = Number(await resolveCityId(body.prm_ciudad));
+      if (body.prm_tipo_inmueble) body.prm_tipo_inmueble = Number(await resolvePropertyTypeId(body.prm_tipo_inmueble));
+      return body;
+    });
+    return res.json(result);
+  } catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/simular-modificacion-reserva", async (req, res) => {
+  try { return res.json(await proxyToLimpiafy("agenteIA/simular-modificacion-reserva", req.body)); }
+  catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/confirmar-modificacion-reserva", async (req, res) => {
+  try { return res.json(await proxyToLimpiafy("agenteIA/confirmar-modificacion-reserva", req.body)); }
+  catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/cotizar-respondio", async (req, res) => {
   try {
     const input = req.body ?? {};
     const dniCliente = String(input.dni_cliente ?? "").trim();
