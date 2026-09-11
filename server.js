@@ -11,7 +11,7 @@ const {
   LIMPIAFY_X_KEY
 } = process.env;
 
-const VERSION = "2.2.4";
+const VERSION = "2.2.5";
 
 function validateEnvironment() {
   const missing = [];
@@ -598,17 +598,49 @@ app.post("/gestionar-cuenta", async (req, res) => {
       body.tipo_documento = await resolveDocumentTypeId(body.tipo_documento);
       body.tipo_cliente = String(body.tipo_cliente).trim().toUpperCase();
 
-      // Enviar el payload minimo documentado. Evitamos campos opcionales que
-      // puedan tener validaciones adicionales en produccion.
+      // Construir el payload canonico documentado por Limpiafy.
+      // Para PERSONA NATURAL nunca enviamos razon_social, aunque Respond.io
+      // la incluya vacia en la peticion visible del agente.
       const payload = pickAllowed(body, [
         "tipo_cliente", "tipo_documento", "numero_documento",
-        "nombres", "apellidos", "razon_social", "email", "celular"
+        "nombres", "apellidos", "email", "celular",
+        "actividad_comercial"
       ]);
 
-      if (payload.tipo_cliente === "PERSONA NATURAL") delete payload.razon_social;
+      if (payload.tipo_cliente === "PERSONA NATURAL") {
+        delete payload.actividad_comercial;
+      } else if (payload.tipo_cliente === "PERSONA JURIDICO" || payload.tipo_cliente === "PERSONA JURIDICA") {
+        payload.tipo_cliente = "PERSONA JURIDICO";
+        if (body.razon_social) payload.razon_social = String(body.razon_social).trim();
+      }
+
+      // Aunque aparecen como opcionales en la coleccion, son los valores
+      // canonicos usados por el flujo de Agente IA y evitan diferencias con
+      // el alta realizada desde los clientes oficiales.
+      payload.canal_origen = "AGENTE_IA";
+      payload.envio_notificaciones_wsp = 1;
 
       console.log("Gestion cuenta CREAR_SOLICITAR_OTP normalizado:", JSON.stringify(payload));
-      return res.json(await proxyToLimpiafy("agenteIA/crear-usuario", payload));
+
+      try {
+        return res.json(await proxyToLimpiafy("agenteIA/crear-usuario", payload));
+      } catch (firstError) {
+        // Compatibilidad con implementaciones historicas del controlador que
+        // consultan dni_cliente durante el alta aunque el contrato actual use
+        // numero_documento. Solo reintentamos ante error del backend.
+        const fallbackPayload = { ...payload, dni_cliente: payload.numero_documento };
+        console.log("Reintento crear-usuario con dni_cliente compatible:", JSON.stringify(fallbackPayload));
+        try {
+          return res.json(await proxyToLimpiafy("agenteIA/crear-usuario", fallbackPayload));
+        } catch (secondError) {
+          // Preservar el error mas informativo del segundo intento y adjuntar
+          // el primero para facilitar diagnostico en EasyPanel.
+          if (secondError && typeof secondError === "object") {
+            secondError.firstPayload = firstError?.payload;
+          }
+          throw secondError;
+        }
+      }
     }
 
     if (operacion === "CREAR_CONFIRMAR_OTP") {
