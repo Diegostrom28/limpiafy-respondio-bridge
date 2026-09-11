@@ -11,7 +11,7 @@ const {
   LIMPIAFY_X_KEY
 } = process.env;
 
-const VERSION = "2.2.5";
+const VERSION = "2.2.6";
 
 function validateEnvironment() {
   const missing = [];
@@ -608,6 +608,11 @@ app.post("/gestionar-cuenta", async (req, res) => {
       ]);
 
       if (payload.tipo_cliente === "PERSONA NATURAL") {
+        // El contrato documentado de /agenteIA/crear-usuario incluye
+        // razon_social:"" aun para PERSONA NATURAL. No se solicita al
+        // Usuario ni se interpreta como dato empresarial; se envia vacio
+        // solo por compatibilidad con validadores legacy del backend.
+        payload.razon_social = "";
         delete payload.actividad_comercial;
       } else if (payload.tipo_cliente === "PERSONA JURIDICO" || payload.tipo_cliente === "PERSONA JURIDICA") {
         payload.tipo_cliente = "PERSONA JURIDICO";
