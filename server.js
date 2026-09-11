@@ -11,7 +11,7 @@ const {
   LIMPIAFY_X_KEY
 } = process.env;
 
-const VERSION = "2.2.6";
+const VERSION = "2.2.7";
 
 function validateEnvironment() {
   const missing = [];
@@ -47,6 +47,13 @@ function compactText(value) {
 
 function isNumericId(value) {
   return /^\d+$/.test(String(value ?? "").trim());
+}
+
+function normalizeColombiaPhone(value) {
+  const digits = String(value ?? "").replace(/\D/g, "");
+  if (digits.length === 12 && digits.startsWith("57")) return digits.slice(2);
+  if (digits.length === 10) return digits;
+  return digits;
 }
 
 async function resolveDocumentTypeId(value) {
@@ -132,6 +139,24 @@ async function callApi(path, body) {
     throw error;
   }
   return parsed;
+}
+
+async function callApiDiagnostic(path, body) {
+  const url = `${LIMPIAFY_API_URL.replace(/\/+$/, "")}/${String(path).replace(/^\/+/, "")}`;
+  try {
+    const apiResponse = await fetch(url, {
+      method: "POST",
+      headers: apiHeaders(),
+      body: JSON.stringify(body)
+    });
+    const raw = await apiResponse.text();
+    let parsed;
+    try { parsed = raw ? JSON.parse(raw) : {}; }
+    catch { parsed = { raw }; }
+    return { http_status: apiResponse.status, ok: apiResponse.ok, body: parsed };
+  } catch (error) {
+    return { http_status: null, ok: false, network_error: error?.message ?? String(error) };
+  }
 }
 
 function unwrapData(response) {
@@ -447,7 +472,7 @@ app.get("/", (_req, res) => res.json({
   version: VERSION,
   environment: "production",
   endpoints: [
-    "/health", "/debug-respondio",
+    "/health", "/debug-respondio", "/diagnostico-crear-usuario",
     "/consultar", "/gestionar-cuenta", "/gestionar-direcciones", "/modificar-reserva",
     "/consultar-paquetes", "/consultar-detalle-paquete", "/consultar-ciudades",
     "/consultar-tipos-inmueble", "/consultar-cliente", "/consultar-direcciones", "/consultar-cupon",
@@ -584,6 +609,48 @@ function normalizeAddressAliases(input = {}) {
   return removeEmptyFields(body);
 }
 
+app.post("/diagnostico-crear-usuario", async (req, res) => {
+  try {
+    let body = removeEmptyFields({ ...req.body });
+    delete body.operacion;
+    const required = ["tipo_cliente", "tipo_documento", "numero_documento", "email", "celular"];
+    const missing = required.filter((key) => body[key] === undefined || body[key] === null || String(body[key]).trim() === "");
+    if (missing.length) return res.json({ success: 0, stage: "bridge_validation", missing });
+
+    body.tipo_documento = await resolveDocumentTypeId(body.tipo_documento);
+    body.tipo_cliente = String(body.tipo_cliente).trim().toUpperCase();
+    body.celular = normalizeColombiaPhone(body.celular);
+
+    const payload = pickAllowed(body, [
+      "tipo_cliente", "tipo_documento", "numero_documento",
+      "nombres", "apellidos", "email", "celular", "actividad_comercial"
+    ]);
+
+    if (payload.tipo_cliente === "PERSONA NATURAL") {
+      payload.razon_social = "";
+      delete payload.actividad_comercial;
+    } else if (payload.tipo_cliente === "PERSONA JURIDICO" || payload.tipo_cliente === "PERSONA JURIDICA") {
+      payload.tipo_cliente = "PERSONA JURIDICO";
+      if (body.razon_social && String(body.razon_social).toUpperCase() !== "NO_APLICA") {
+        payload.razon_social = String(body.razon_social).trim();
+      }
+    }
+
+    payload.canal_origen = "AGENTE_IA";
+    payload.envio_notificaciones_wsp = 1;
+
+    const api = await callApiDiagnostic("agenteIA/crear-usuario", payload);
+    return res.json({
+      success: api.ok ? 1 : 0,
+      version: VERSION,
+      normalized_payload: payload,
+      api
+    });
+  } catch (error) {
+    return res.json({ success: 0, version: VERSION, stage: "diagnostic", error: error?.message ?? String(error) });
+  }
+});
+
 app.post("/gestionar-cuenta", async (req, res) => {
   try {
     const operacion = String(req.body?.operacion ?? "").trim().toUpperCase();
@@ -597,6 +664,9 @@ app.post("/gestionar-cuenta", async (req, res) => {
 
       body.tipo_documento = await resolveDocumentTypeId(body.tipo_documento);
       body.tipo_cliente = String(body.tipo_cliente).trim().toUpperCase();
+      body.celular = normalizeColombiaPhone(body.celular);
+      if (String(body.otp ?? "").trim().toUpperCase() === "NO_APLICA") delete body.otp;
+      if (String(body.razon_social ?? "").trim().toUpperCase() === "NO_APLICA") body.razon_social = "";
 
       // Construir el payload canonico documentado por Limpiafy.
       // Para PERSONA NATURAL nunca enviamos razon_social, aunque Respond.io
