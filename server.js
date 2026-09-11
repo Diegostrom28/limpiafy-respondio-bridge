@@ -11,7 +11,7 @@ const {
   LIMPIAFY_X_KEY
 } = process.env;
 
-const VERSION = "2.2.1";
+const VERSION = "2.2.2";
 
 function validateEnvironment() {
   const missing = [];
@@ -47,6 +47,30 @@ function compactText(value) {
 
 function isNumericId(value) {
   return /^\d+$/.test(String(value ?? "").trim());
+}
+
+function resolveDocumentTypeId(value) {
+  if (isNumericId(value)) return Number(value);
+
+  const normalized = compactText(value);
+
+  // La colección oficial usa tipo_documento=1 en el ejemplo de PERSONA NATURAL.
+  // Aceptamos las variantes conversacionales habituales de Cédula de Ciudadanía.
+  const aliases = new Map([
+    ["cc", 1],
+    ["cedula", 1],
+    ["cedulaciudadania", 1],
+    ["ceduladeciudadania", 1],
+    ["ceduladeciudadania", 1]
+  ]);
+
+  const resolved = aliases.get(normalized);
+  if (resolved) {
+    console.log(`Tipo de documento resuelto: ${value} -> ${resolved}`);
+    return resolved;
+  }
+
+  throw new Error(`tipo_documento no reconocido: "${value}". Envía un ID numérico o Cédula de Ciudadanía.`);
 }
 
 function addHours(time, hoursToAdd) {
@@ -465,6 +489,19 @@ app.post("/gestionar-cuenta", async (req, res) => {
 
     const body = removeEmptyFields({ ...req.body });
     delete body.operacion;
+
+    if (["CREAR_SOLICITAR_OTP", "ACTUALIZAR_CONFIRMAR_OTP"].includes(operacion) && body.tipo_documento !== undefined) {
+      body.tipo_documento = resolveDocumentTypeId(body.tipo_documento);
+    }
+
+    if (operacion === "CREAR_SOLICITAR_OTP") {
+      const required = ["tipo_cliente", "tipo_documento", "numero_documento", "email", "celular"];
+      const missing = required.filter((key) => body[key] === undefined || body[key] === null || String(body[key]).trim() === "");
+      if (missing.length) {
+        throw new Error(`Faltan campos para crear Usuario: ${missing.join(", ")}`);
+      }
+    }
+
     return res.json(await proxyToLimpiafy(path, body));
   } catch (error) { return bridgeError(res, error); }
 });
@@ -579,8 +616,11 @@ app.post("/pagar", async (req, res) => {
 });
 
 app.post("/crear-usuario", async (req, res) => {
-  try { return res.json(await proxyToLimpiafy("agenteIA/crear-usuario", req.body)); }
-  catch (error) { return bridgeError(res, error); }
+  try {
+    const body = removeEmptyFields({ ...req.body });
+    if (body.tipo_documento !== undefined) body.tipo_documento = resolveDocumentTypeId(body.tipo_documento);
+    return res.json(await proxyToLimpiafy("agenteIA/crear-usuario", body));
+  } catch (error) { return bridgeError(res, error); }
 });
 
 app.post("/confirmar-crear-usuario", async (req, res) => {
@@ -594,8 +634,11 @@ app.post("/solicitar-actualizacion-usuario", async (req, res) => {
 });
 
 app.post("/confirmar-actualizacion-usuario", async (req, res) => {
-  try { return res.json(await proxyToLimpiafy("agenteIA/confirmar-actualizacion-usuario", req.body)); }
-  catch (error) { return bridgeError(res, error); }
+  try {
+    const body = removeEmptyFields({ ...req.body });
+    if (body.tipo_documento !== undefined) body.tipo_documento = resolveDocumentTypeId(body.tipo_documento);
+    return res.json(await proxyToLimpiafy("agenteIA/confirmar-actualizacion-usuario", body));
+  } catch (error) { return bridgeError(res, error); }
 });
 
 app.post("/listar-direcciones", async (req, res) => {
