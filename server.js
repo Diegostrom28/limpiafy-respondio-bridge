@@ -11,7 +11,7 @@ const {
   LIMPIAFY_X_KEY
 } = process.env;
 
-const VERSION = "2.0.0";
+const VERSION = "2.0.1";
 
 function validateEnvironment() {
   const missing = [];
@@ -248,6 +248,7 @@ function normalizeCalendar(rawCalendar) {
 
     return {
       fecha,
+      horario: horaInicial,
       hora_inicial: horaInicial,
       hora_final: horaFinal,
       hora_adicional: horaAdicional
