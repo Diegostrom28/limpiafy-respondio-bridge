@@ -5,606 +5,358 @@ app.use(express.json({ limit: "1mb" }));
 
 const {
   PORT = "3000",
-  LIMPIAFY_API_URL,
+  LIMPIAFY_API_URL = "https://r394ip4mkf.execute-api.us-east-1.amazonaws.com/clientes",
   LIMPIAFY_X_APP,
   LIMPIAFY_X_TOKEN,
   LIMPIAFY_X_KEY
 } = process.env;
 
+const VERSION = "2.0.0";
+
 function validateEnvironment() {
-  const required = {
-    LIMPIAFY_API_URL,
-    LIMPIAFY_X_APP,
-    LIMPIAFY_X_TOKEN,
-    LIMPIAFY_X_KEY
+  const missing = [];
+  if (!LIMPIAFY_API_URL) missing.push("LIMPIAFY_API_URL");
+  if (!LIMPIAFY_X_APP) missing.push("LIMPIAFY_X_APP");
+  if (!LIMPIAFY_X_TOKEN) missing.push("LIMPIAFY_X_TOKEN");
+  if (!LIMPIAFY_X_KEY) missing.push("LIMPIAFY_X_KEY");
+  if (missing.length) throw new Error(`Faltan variables de entorno: ${missing.join(", ")}`);
+}
+
+function apiHeaders() {
+  return {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    "X-APP": LIMPIAFY_X_APP,
+    "X-TOKEN": LIMPIAFY_X_TOKEN,
+    "X-KEY": LIMPIAFY_X_KEY
   };
-
-  const missing = Object.entries(required)
-    .filter(([, value]) => !value)
-    .map(([key]) => key);
-
-  if (missing.length > 0) {
-    throw new Error(`Faltan variables de entorno: ${missing.join(", ")}`);
-  }
 }
 
 function normalizeText(value) {
   return String(value ?? "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\uFFFD/g, "")
     .toLowerCase()
     .trim();
 }
 
 function compactText(value) {
-  return normalizeText(value)
-    .replace(/\uFFFD/g, "")
-    .replace(/[^a-z0-9]/g, "");
-}
-
-function textMatches(candidate, search) {
-  const candidateCompact = compactText(candidate);
-  const searchCompact = compactText(search);
-
-  if (!candidateCompact || !searchCompact) {
-    return false;
-  }
-
-  return (
-    candidateCompact === searchCompact ||
-    candidateCompact.includes(searchCompact) ||
-    searchCompact.includes(candidateCompact)
-  );
+  return normalizeText(value).replace(/[^a-z0-9]/g, "");
 }
 
 function isNumericId(value) {
   return /^\d+$/.test(String(value ?? "").trim());
 }
 
-const CITY_ID_ALIASES = new Map([
-  ["bogota", "12688"],
-  ["bogota d.c.", "12688"],
-  ["bogotadc", "12688"]
-]);
-
-function resolveKnownCityAlias(value) {
-  const normalized = compactText(value);
-
-  for (const [name, id] of CITY_ID_ALIASES.entries()) {
-    if (compactText(name) === normalized) {
-      return id;
-    }
-  }
-
-  return null;
+function addHours(time, hoursToAdd) {
+  const match = String(time ?? "").match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  const h = Number(match[1]), m = Number(match[2]), s = Number(match[3] ?? 0);
+  if (h > 23 || m > 59 || s > 59) return null;
+  const total = (h * 3600 + m * 60 + s + Number(hoursToAdd) * 3600) % 86400;
+  const hh = String(Math.floor(total / 3600)).padStart(2, "0");
+  const mm = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
+  const ss = String(total % 60).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
 }
 
-function parseCalendar(value) {
-  let current = value;
+async function callApi(path, body) {
+  const url = `${LIMPIAFY_API_URL.replace(/\/+$/, "")}/${String(path).replace(/^\/+/, "")}`;
+  const apiResponse = await fetch(url, {
+    method: "POST",
+    headers: apiHeaders(),
+    body: JSON.stringify(body)
+  });
 
-  // Respond.io puede enviar el arreglo como JSON serializado una o dos veces.
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    if (Array.isArray(current)) {
-      return current;
-    }
+  const raw = await apiResponse.text();
+  let parsed;
+  try { parsed = raw ? JSON.parse(raw) : {}; }
+  catch { parsed = { raw }; }
 
-    if (typeof current !== "string") {
-      break;
-    }
-
-    const trimmed = current.trim();
-
-    if (!trimmed) {
-      throw new Error("calendario está vacío");
-    }
-
-    try {
-      current = JSON.parse(trimmed);
-    } catch {
-      throw new Error("calendario no contiene un JSON válido");
-    }
+  if (!apiResponse.ok) {
+    const error = new Error(`Limpiafy API respondió HTTP ${apiResponse.status}`);
+    error.status = apiResponse.status;
+    error.payload = parsed;
+    throw error;
   }
-
-  if (!Array.isArray(current)) {
-    throw new Error(
-      `calendario debe contener un arreglo; se recibió ${typeof current}`
-    );
-  }
-
-  return current;
+  return parsed;
 }
 
-function validateCalendar(calendar, requiredDays) {
-  if (calendar.length !== requiredDays) {
-    throw new Error(
-      `dias_requeridos es ${requiredDays}, pero calendario contiene ${calendar.length} elementos`
+function unwrapData(response) {
+  return response && typeof response === "object" && "data" in response ? response.data : response;
+}
+
+function objectRows(value) {
+  const data = unwrapData(value);
+  const rows = [];
+  const visit = (node) => {
+    if (node == null) return;
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item);
+      return;
+    }
+    if (typeof node !== "object") return;
+
+    const keys = Object.keys(node);
+    const looksLikeRow = keys.some((key) =>
+      /^(id|id[A-Z_]|nombre|nombre[A-Z_]|categoria|departamento|ciudad|valor_|habilitada_)/i.test(key)
     );
-  }
+    if (looksLikeRow) rows.push(node);
 
-  return calendar.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new Error(`El elemento ${index + 1} de calendario no es válido`);
+    for (const [key, child] of Object.entries(node)) {
+      if (key === "fecha_actual") continue;
+      if (child && typeof child === "object") visit(child);
     }
+  };
+  visit(data);
 
-    if (!item.fecha) {
-      throw new Error(`Falta fecha en el elemento ${index + 1} del calendario`);
-    }
-
-    if (!item.horario) {
-      throw new Error(`Falta horario en el elemento ${index + 1} del calendario`);
-    }
-
-    return {
-      fecha: String(item.fecha),
-      horario: String(item.horario),
-      hora_adicional:
-        item.hora_adicional === undefined ||
-        item.hora_adicional === null ||
-        item.hora_adicional === ""
-          ? "0"
-          : String(item.hora_adicional)
-    };
+  const seen = new Set();
+  return rows.filter((row) => {
+    const sig = JSON.stringify(row);
+    if (seen.has(sig)) return false;
+    seen.add(sig);
+    return true;
   });
 }
 
-function extractRows(data) {
-  const rows = [];
-  const seen = new Set();
-
-  function visit(value) {
-    if (!value || typeof value !== "object") {
-      return;
-    }
-
-    if (seen.has(value)) {
-      return;
-    }
-
-    seen.add(value);
-
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        visit(item);
-      }
-      return;
-    }
-
-    // Conserva cada objeto como posible registro y sigue recorriendo
-    // sus propiedades para soportar respuestas anidadas.
-    rows.push(value);
-
-    for (const child of Object.values(value)) {
-      visit(child);
-    }
-  }
-
-  visit(data);
-
-  return rows;
-}
-
-function findIdField(row) {
-  const preferredKeys = [
-    "idCiudad",
-    "id_ciudad",
-    "ciudad_id",
-    "idTipoInmueble",
-    "id_tipo_inmueble",
-    "tipo_inmueble_id",
-    "idPaquete",
-    "id_paquete",
-    "paquete_id",
-    "prm_ciudad",
-    "prm_tipo_inmueble",
-    "prm_paquete",
-    "id"
-  ];
-
-  for (const key of preferredKeys) {
-    if (row[key] !== undefined && row[key] !== null && row[key] !== "") {
-      const candidate = String(row[key]).trim();
-
-      if (/^\d+$/.test(candidate)) {
-        return candidate;
-      }
-    }
-  }
-
-  const blockedKeys = new Set([
-    "idDepartamento",
-    "id_departamento",
-    "departamento_id"
-  ]);
-
-  for (const [key, value] of Object.entries(row)) {
-    if (blockedKeys.has(key)) {
-      continue;
-    }
-
-    if (
-      /(id|codigo|code|value|valor)/i.test(key) &&
-      value !== undefined &&
-      value !== null &&
-      /^\d+$/.test(String(value).trim())
-    ) {
+function pickNumeric(row, keys) {
+  for (const key of keys) {
+    const value = row?.[key];
+    if (value !== undefined && value !== null && /^\d+$/.test(String(value).trim())) {
       return String(value).trim();
     }
   }
-
   return null;
 }
 
-function rowText(row) {
-  return normalizeText(
-    Object.entries(row)
-      .filter(([key]) => !/^(id|estado|iva|valor|fecha|cantidad|min|max)/i.test(key))
-      .map(([, value]) => value)
-      .join(" ")
-  );
+function scoreText(haystack, needle) {
+  const h = compactText(haystack), n = compactText(needle);
+  if (!h || !n) return 0;
+  if (h === n) return 1000;
+  if (h.includes(n)) return 500;
+  if (n.includes(h)) return 250;
+  return 0;
 }
 
-function scoreRow(row, searchTerms) {
-  const text = rowText(row);
-  const compactRow = compactText(text);
-  let score = 0;
-
-  for (const term of searchTerms.filter(Boolean)) {
-    const normalized = normalizeText(term);
-    const compactTerm = compactText(term);
-
-    if (!normalized || !compactTerm) {
-      continue;
-    }
-
-    if (text === normalized) {
-      score += 100;
-    } else if (text.includes(normalized)) {
-      score += 30;
-    }
-
-    if (compactRow === compactTerm) {
-      score += 120;
-    } else if (compactRow.includes(compactTerm)) {
-      score += 60;
-    }
-
-    for (const word of normalized.split(/\s+/).filter(Boolean)) {
-      if (text.includes(word)) {
-        score += 5;
-      }
-    }
-  }
-
-  return score;
-}
-
-async function callBuscar(tipo, valor = "") {
-  const response = await fetch(
-    `${LIMPIAFY_API_URL.replace(/\/$/, "")}/clientes/agenteIA/buscar`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-APP": LIMPIAFY_X_APP,
-        "X-TOKEN": LIMPIAFY_X_TOKEN,
-        "X-KEY": LIMPIAFY_X_KEY
-      },
-      body: JSON.stringify({ tipo, valor })
-    }
-  );
-
-  const raw = await response.text();
-  let body;
-
-  try {
-    body = JSON.parse(raw);
-  } catch {
-    throw new Error(`Respuesta inválida al consultar ${tipo}: ${raw}`);
-  }
-
-  if (!response.ok || body?.success === 0) {
-    throw new Error(
-      body?.message || body?.error || `No fue posible consultar ${tipo}`
-    );
-  }
-
-  return extractRows(body?.data);
+async function buscar(tipo, valor = "") {
+  return callApi("agenteIA/buscar", { tipo, valor });
 }
 
 async function resolveCityId(value) {
-  if (isNumericId(value)) {
-    return String(value);
-  }
+  if (isNumericId(value)) return String(value);
+  const candidates = [...new Set([
+    String(value ?? "").trim(),
+    String(value ?? "").replace(/\uFFFD/g, "").trim(),
+    normalizeText(value)
+  ].filter(Boolean))];
 
-  const original = String(value ?? "").trim();
+  for (const candidate of candidates) {
+    const response = await buscar("DEPARTAMENTOS_CIUDADES", candidate);
+    const rows = objectRows(response);
+    const ranked = rows.map((row) => ({
+      row,
+      id: pickNumeric(row, ["idCiudad", "id_ciudad", "ciudad_id"]),
+      score: scoreText(row.nombreCiudad ?? row.nombre_ciudad ?? row.ciudad ?? "", candidate) +
+        (String(row.habilitada_para_limpiafy ?? "1") === "1" ? 50 : -1000)
+    })).filter(x => x.id && x.score > 0).sort((a,b) => b.score-a.score);
 
-  if (!original) {
-    throw new Error("La ciudad está vacía");
-  }
-
-  const candidates = [
-    original,
-    original.replace(/\uFFFD/g, ""),
-    normalizeText(original),
-    compactText(original)
-  ].filter(Boolean);
-
-  const uniqueCandidates = [...new Set(candidates)];
-
-  for (const candidate of uniqueCandidates) {
-    const rows = await callBuscar("DEPARTAMENTOS_CIUDADES", candidate);
-
-    console.log(
-      `Consulta de ciudad "${candidate}" devolvió:`,
-      rows.length,
-      "registros"
-    );
-
-    console.log(
-      "Muestra de ciudad:",
-      JSON.stringify(rows.slice(0, 5))
-    );
-
-    const ranked = rows
-      .map((row) => {
-        const text = rowText(row);
-        const tolerantBonus = textMatches(text, original) ? 100 : 0;
-
-        return {
-          row,
-          score: scoreRow(row, [original, candidate]) + tolerantBonus
-        };
-      })
-      .filter(({ row, score }) => score > 0 && findIdField(row))
-      .sort((a, b) => b.score - a.score);
-
-    if (ranked.length > 0) {
-      if (
-        ranked.length > 1 &&
-        ranked[0].score === ranked[1].score &&
-        findIdField(ranked[0].row) !== findIdField(ranked[1].row)
-      ) {
-        throw new Error(
-          `La ciudad "${original}" tiene más de una coincidencia`
-        );
-      }
-
-      const id = findIdField(ranked[0].row);
-
-      console.log(`Ciudad resuelta: ${original} -> ${id}`);
-      return id;
+    if (ranked.length) {
+      console.log(`Ciudad resuelta: ${value} -> ${ranked[0].id}`);
+      return ranked[0].id;
     }
   }
-
-  const knownAliasId =
-    typeof resolveKnownCityAlias === "function"
-      ? resolveKnownCityAlias(original)
-      : null;
-
-  if (knownAliasId) {
-    console.log(`Ciudad resuelta por alias: ${original} -> ${knownAliasId}`);
-    return knownAliasId;
-  }
-
-  throw new Error(
-    `No se encontró un ID válido para la ciudad "${original}"`
-  );
+  throw new Error(`No se encontró una ciudad válida para "${value}"`);
 }
 
 async function resolvePropertyTypeId(value) {
-  if (isNumericId(value)) {
-    return String(value);
-  }
+  if (isNumericId(value)) return String(value);
+  const rows = objectRows(await buscar("TIPO_INMUEBLE", ""));
+  const ranked = rows.map((row) => ({
+    id: pickNumeric(row, ["id", "idTipoInmueble", "id_tipo_inmueble", "tipo_inmueble_id"]),
+    score: scoreText(row.nombre ?? row.nombreTipoInmueble ?? row.tipo_inmueble ?? row.descripcion ?? "", value)
+  })).filter(x => x.id && x.score > 0).sort((a,b) => b.score-a.score);
 
-  const rows = await callBuscar("TIPO_INMUEBLE", String(value));
-  console.log("Registros de tipo de inmueble encontrados:", rows.length);
-
-  const ranked = rows
-    .map((row) => ({
-      row,
-      score: scoreRow(row, [value])
-    }))
-    .filter(({ row, score }) => score > 0 && findIdField(row))
-    .sort((a, b) => b.score - a.score);
-
-  if (ranked.length === 0) {
-    throw new Error(
-      `No se encontró un ID válido para el tipo de inmueble "${value}"`
-    );
-  }
-
-  return findIdField(ranked[0].row);
+  if (!ranked.length) throw new Error(`No se encontró el tipo de inmueble "${value}"`);
+  console.log(`Tipo de inmueble resuelto: ${value} -> ${ranked[0].id}`);
+  return ranked[0].id;
 }
 
 function expectedPackageCategory(propertyType) {
-  const normalized = normalizeText(propertyType);
-
-  if (
-    normalized.includes("oficina") ||
-    normalized.includes("empresa") ||
-    normalized.includes("corporativo")
-  ) {
-    return "empresas oficinas";
-  }
-
-  if (
-    normalized.includes("casa") ||
-    normalized.includes("apartamento") ||
-    normalized.includes("hogar")
-  ) {
-    return "hogar";
-  }
-
+  const t = normalizeText(propertyType);
+  if (/(oficina|empresa|corporativo)/.test(t)) return "empresas oficinas";
+  if (/(casa|apartamento|hogar)/.test(t)) return "hogar";
   return "";
 }
 
 async function resolvePackageId(value, propertyType) {
-  if (isNumericId(value)) {
-    return String(value);
+  if (isNumericId(value)) return String(value);
+  const rows = objectRows(await buscar("TODOS_PAQUETES", ""));
+  const expected = compactText(expectedPackageCategory(propertyType));
+
+  const ranked = rows.map((row) => {
+    const name = row.nombre_paquete ?? row.nombrePaquete ?? row.nombre ?? "";
+    const category = row.categoria_servicio ?? row.categoria ?? "";
+    let score = scoreText(name, value);
+    if (expected && compactText(category).includes(expected)) score += 200;
+    return {
+      id: pickNumeric(row, ["id", "idPaquete", "id_paquete", "paquete_id"]),
+      score
+    };
+  }).filter(x => x.id && x.score > 0).sort((a,b) => b.score-a.score);
+
+  if (!ranked.length) throw new Error(`No se encontró el paquete "${value}"`);
+  if (ranked.length > 1 && ranked[0].score === ranked[1].score && ranked[0].id !== ranked[1].id) {
+    throw new Error(`El paquete "${value}" tiene más de una coincidencia`);
   }
-
-  const rows = await callBuscar("TODOS_PAQUETES", "");
-  console.log("Registros de paquetes encontrados:", rows.length);
-  const category = expectedPackageCategory(propertyType);
-
-  const ranked = rows
-    .map((row) => {
-      const rowNormalizedText = rowText(row);
-
-      return {
-        row,
-        score:
-          scoreRow(row, [value]) +
-          (
-            category &&
-            compactText(rowNormalizedText).includes(compactText(category))
-              ? 50
-              : 0
-          )
-      };
-    })
-    .filter(({ row, score }) => score > 0 && findIdField(row))
-    .sort((a, b) => b.score - a.score);
-
-  if (ranked.length === 0) {
-    throw new Error(`No se encontró un ID válido para el paquete "${value}"`);
-  }
-
-  return findIdField(ranked[0].row);
+  console.log(`Paquete resuelto: ${value} -> ${ranked[0].id}`);
+  return ranked[0].id;
 }
 
-app.get("/", (_request, response) => {
-  response.json({
-    status: "ok",
-    service: "limpiafy-respondio-bridge",
-    version: "1.6.2",
-    endpoints: ["/health", "/cotizar-respondio"]
-  });
-});
+function parseCalendar(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) throw new Error("calendario no es un arreglo");
+    return parsed;
+  }
+  throw new Error("calendario debe ser un arreglo o un JSON de texto");
+}
 
-app.get("/health", (_request, response) => {
-  response.json({
-    status: "ok",
-    service: "limpiafy-respondio-bridge",
-    version: "1.6.2"
-  });
-});
+function normalizeCalendar(rawCalendar) {
+  return parseCalendar(rawCalendar).map((item, index) => {
+    const fecha = String(item?.fecha ?? "").trim();
+    const horaInicial = String(item?.hora_inicial ?? item?.horario ?? item?.hora ?? "").trim();
 
-app.post("/cotizar-respondio", async (request, response) => {
-  try {
-    const {
-      prm_ciudad,
-      dias_requeridos,
-      direccion,
-      dni_cliente,
-      prm_paquete,
-      calendario,
-      prm_tipo_inmueble
-    } = request.body ?? {};
+    const horaAdicional =
+      item?.hora_adicional === undefined || item?.hora_adicional === null || item?.hora_adicional === ""
+        ? 0
+        : Number(item.hora_adicional);
 
-    const requiredFields = {
-      prm_ciudad,
-      dias_requeridos,
-      direccion,
-      dni_cliente,
-      prm_paquete,
-      calendario,
-      prm_tipo_inmueble
+    if (!fecha) throw new Error(`Falta fecha en calendario[${index}]`);
+    if (!horaInicial) throw new Error(`Falta hora en calendario[${index}]`);
+    if (!Number.isFinite(horaAdicional) || horaAdicional < 0) {
+      throw new Error(`hora_adicional inválida en calendario[${index}]`);
+    }
+
+    const horasBase =
+      item?.horas === undefined || item?.horas === null || item?.horas === ""
+        ? 8
+        : Number(item.horas);
+
+    const horaFinal = String(item?.hora_final ?? "").trim() || addHours(horaInicial, horasBase + horaAdicional);
+
+    return {
+      fecha,
+      hora_inicial: horaInicial,
+      hora_final: horaFinal,
+      hora_adicional: horaAdicional
     };
+  });
+}
 
-    const missingFields = Object.entries(requiredFields)
-      .filter(([, value]) => value === undefined || value === null || value === "")
-      .map(([key]) => key);
+function bridgeError(response, error) {
+  console.error("Bridge error:", error);
+  if (error?.payload) console.error("Respuesta API:", JSON.stringify(error.payload));
+  return response.status(500).json({
+    success: 0,
+    code: "BRIDGE_ERROR",
+    message: error?.message ?? "Error procesando la solicitud",
+    api: error?.payload ?? undefined
+  });
+}
 
-    if (missingFields.length > 0) {
-      return response.status(400).json({
-        success: 0,
-        code: "MISSING_FIELDS",
-        message: `Faltan campos: ${missingFields.join(", ")}`
-      });
+app.get("/", (_req, res) => res.json({
+  status: "ok",
+  service: "limpiafy-respondio-bridge",
+  version: VERSION,
+  environment: "production",
+  endpoints: ["/health", "/debug-respondio", "/consultar-paquetes", "/consultar-ciudades", "/consultar-tipos-inmueble", "/cotizar-respondio"]
+}));
+
+app.get("/health", (_req, res) => res.json({
+  status: "ok",
+  service: "limpiafy-respondio-bridge",
+  version: VERSION
+}));
+
+app.post("/debug-respondio", (req, res) => {
+  console.log("DEBUG RESPOND.IO:", JSON.stringify({ headers: req.headers, body: req.body }));
+  res.json({ success: 1, source: "LIMPIAFY_BRIDGE", version: VERSION, receivedBody: req.body });
+});
+
+app.post("/consultar-paquetes", async (_req, res) => {
+  try { return res.json(await buscar("TODOS_PAQUETES", "")); }
+  catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/consultar-ciudades", async (req, res) => {
+  try {
+    const valor = req.body?.valor ?? req.body?.ciudad ?? "";
+    return res.json(await buscar("DEPARTAMENTOS_CIUDADES", valor));
+  } catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/consultar-tipos-inmueble", async (_req, res) => {
+  try { return res.json(await buscar("TIPO_INMUEBLE", "")); }
+  catch (error) { return bridgeError(res, error); }
+});
+
+app.post("/cotizar-respondio", async (req, res) => {
+  try {
+    const input = req.body ?? {};
+    const dniCliente = String(input.dni_cliente ?? "").trim();
+    const direccion = String(input.direccion ?? "").trim();
+
+    if (!dniCliente) throw new Error("Falta dni_cliente");
+    if (!direccion) throw new Error("Falta direccion");
+    if (!input.prm_ciudad) throw new Error("Falta prm_ciudad");
+    if (!input.prm_paquete) throw new Error("Falta prm_paquete");
+    if (!input.prm_tipo_inmueble) throw new Error("Falta prm_tipo_inmueble");
+
+    const calendario = normalizeCalendar(input.calendario);
+    const diasRequeridos = Number(input.dias_requeridos ?? calendario.length);
+
+    if (!Number.isInteger(diasRequeridos) || diasRequeridos <= 0) {
+      throw new Error("dias_requeridos debe ser un entero mayor que 0");
+    }
+    if (diasRequeridos !== calendario.length) {
+      throw new Error(`dias_requeridos (${diasRequeridos}) no coincide con calendario (${calendario.length})`);
     }
 
-    const numberOfDays = Number(dias_requeridos);
-
-    if (!Number.isInteger(numberOfDays) || numberOfDays < 1) {
-      return response.status(400).json({
-        success: 0,
-        code: "INVALID_DAYS",
-        message: "dias_requeridos debe ser un número entero mayor que cero"
-      });
-    }
-
-    console.log("Calendario recibido:", { tipo: typeof calendario, valor: calendario });
-    const parsedCalendar = parseCalendar(calendario);
-    console.log("Calendario convertido:", { esArray: Array.isArray(parsedCalendar), elementos: parsedCalendar.length });
-    const validatedCalendar = validateCalendar(parsedCalendar, numberOfDays);
-
-    const [cityId, propertyTypeId, packageId] = await Promise.all([
-      resolveCityId(prm_ciudad),
-      resolvePropertyTypeId(prm_tipo_inmueble),
-      resolvePackageId(prm_paquete, prm_tipo_inmueble)
+    const [prmCiudad, prmTipoInmueble, prmPaquete] = await Promise.all([
+      resolveCityId(input.prm_ciudad),
+      resolvePropertyTypeId(input.prm_tipo_inmueble),
+      resolvePackageId(input.prm_paquete, input.prm_tipo_inmueble)
     ]);
 
     const payload = {
-      prm_ciudad: cityId,
-      dias_requeridos: String(numberOfDays),
-      direccion: String(direccion),
-      dni_cliente: String(dni_cliente),
-      prm_paquete: packageId,
-      calendario: validatedCalendar,
-      prm_tipo_inmueble: propertyTypeId
+      dni_cliente: dniCliente,
+      prm_paquete: Number(prmPaquete),
+      dias_requeridos: diasRequeridos,
+      prm_ciudad: Number(prmCiudad),
+      direccion,
+      prm_tipo_inmueble: Number(prmTipoInmueble),
+      calendario
     };
 
+    if (input.cupon) payload.cupon = String(input.cupon).trim();
+    if (input.id_partner && isNumericId(input.id_partner)) payload.id_partner = Number(input.id_partner);
+    else if (input.dni_empleada) payload.dni_empleada = String(input.dni_empleada).trim();
+
     console.log("Payload enviado a Limpiafy:", JSON.stringify(payload));
-
-    const upstreamResponse = await fetch(
-      `${LIMPIAFY_API_URL.replace(/\/$/, "")}/clientes/agenteIA/cotizar`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-APP": LIMPIAFY_X_APP,
-          "X-TOKEN": LIMPIAFY_X_TOKEN,
-          "X-KEY": LIMPIAFY_X_KEY
-        },
-        body: JSON.stringify(payload)
-      }
-    );
-
-    const rawBody = await upstreamResponse.text();
-
-    let body;
-
-    try {
-      body = JSON.parse(rawBody);
-    } catch {
-      body = {
-        success: 0,
-        code: "INVALID_UPSTREAM_RESPONSE",
-        message: rawBody || "La API de Limpiafy devolvió una respuesta vacía"
-      };
-    }
-
-    return response.status(upstreamResponse.status).json(body);
+    const apiResponse = await callApi("agenteIA/cotizar", payload);
+    console.log("Respuesta cotización:", JSON.stringify(apiResponse));
+    return res.status(200).json(apiResponse);
   } catch (error) {
-    console.error("Bridge error:", error);
-
-    return response.status(400).json({
-      success: 0,
-      code: "BRIDGE_ERROR",
-      message:
-        error instanceof Error
-          ? error.message
-          : "No fue posible procesar la cotización"
-    });
+    return bridgeError(res, error);
   }
 });
 
 try {
   validateEnvironment();
-
   app.listen(Number(PORT), "0.0.0.0", () => {
-    console.log(`Servidor activo en el puerto ${PORT}`);
+    console.log(`Servidor ${VERSION} activo en el puerto ${PORT} usando ${LIMPIAFY_API_URL}`);
   });
 } catch (error) {
   console.error(error);
