@@ -11,7 +11,7 @@ const {
   LIMPIAFY_X_KEY
 } = process.env;
 
-const VERSION = "2.2.0";
+const VERSION = "2.2.1";
 
 function validateEnvironment() {
   const missing = [];
@@ -221,6 +221,82 @@ function parseCalendar(value) {
     return parsed;
   }
   throw new Error("calendario debe ser un arreglo o un JSON de texto");
+}
+
+function getBogotaNowParts(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Bogota",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(now);
+
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+    second: Number(values.second)
+  };
+}
+
+function formatYmdUtc(date) {
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(date.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function getBogotaTomorrow(now = new Date()) {
+  const p = getBogotaNowParts(now);
+  const base = new Date(Date.UTC(p.year, p.month - 1, p.day));
+  base.setUTCDate(base.getUTCDate() + 1);
+  return formatYmdUtc(base);
+}
+
+function shouldApply4PM(calendar, now = new Date()) {
+  const p = getBogotaNowParts(now);
+  const atOrAfterFourPm = (p.hour * 60 + p.minute) >= (16 * 60);
+  if (!atOrAfterFourPm) return false;
+
+  const tomorrow = getBogotaTomorrow(now);
+  return calendar.some((item) => String(item?.fecha ?? "").trim() === tomorrow);
+}
+
+function normalizeAdditionalServices(value) {
+  const parsed = parseJsonIfNeeded(value, "servicios_adicionales");
+  if (parsed === undefined || parsed === null || parsed === "") return [];
+  if (!Array.isArray(parsed)) throw new Error("servicios_adicionales debe ser un arreglo");
+  return parsed
+    .map((item) => {
+      if (item && typeof item === "object" && item.prm_servicios !== undefined) {
+        return { ...item, prm_servicios: Number(item.prm_servicios) };
+      }
+      if (/^\d+$/.test(String(item ?? "").trim())) {
+        return { prm_servicios: Number(item) };
+      }
+      return item;
+    })
+    .filter(Boolean);
+}
+
+function add4PMTaskIfNeeded(payload, input, calendar, now = new Date()) {
+  const services = normalizeAdditionalServices(input?.servicios_adicionales);
+
+  if (shouldApply4PM(calendar, now)) {
+    const alreadyAdded = services.some((item) => Number(item?.prm_servicios) === 66);
+    if (!alreadyAdded) services.push({ prm_servicios: 66 });
+    console.log(`Regla 4PM aplicada: tarea 66 agregada. Fecha mañana en Colombia: ${getBogotaTomorrow(now)}`);
+  }
+
+  if (services.length) payload.servicios_adicionales = services;
+  return payload;
 }
 
 function normalizeCalendar(rawCalendar) {
@@ -606,6 +682,8 @@ app.post("/cotizar-respondio", async (req, res) => {
       prm_tipo_inmueble: Number(prmTipoInmueble),
       calendario
     };
+
+    add4PMTaskIfNeeded(payload, input, calendario);
 
     if (input.cupon) payload.cupon = String(input.cupon).trim();
     if (input.id_partner && isNumericId(input.id_partner)) payload.id_partner = Number(input.id_partner);
