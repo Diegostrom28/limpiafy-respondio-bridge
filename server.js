@@ -35,7 +35,7 @@ const {
   LIMPIAFY_TIPOS_DOCUMENTO = ""
 } = process.env;
 
-const VERSION = "2.3.0";
+const VERSION = "2.3.1";
 
 function validateEnvironment() {
   const missing = [];
@@ -356,6 +356,21 @@ async function resolveCityId(value) {
   throw new Error(`No se encontró una ciudad válida para "${value}"`);
 }
 
+// Lista "ID (nombre)" para que la IA pueda reintentar con un valor válido.
+function listOptions(rows, idKeys, nameFn, max = 20) {
+  const seen = new Set();
+  const out = [];
+  for (const row of rows) {
+    const id = pickNumeric(row, idKeys);
+    const name = nameFn(row);
+    if (!id || !name || seen.has(id)) continue;
+    seen.add(id);
+    out.push(`${id} (${String(name).trim()})`);
+    if (out.length >= max) break;
+  }
+  return out.length ? out.join(", ") : "sin opciones disponibles";
+}
+
 async function resolvePropertyTypeId(value) {
   if (isNumericId(value)) return String(value);
   const rows = objectRows(await buscar("TIPO_INMUEBLE", ""));
@@ -364,7 +379,9 @@ async function resolvePropertyTypeId(value) {
     score: scoreText(row.nombre ?? row.nombreTipoInmueble ?? row.tipo_inmueble ?? row.descripcion ?? "", value)
   })).filter(x => x.id && x.score > 0).sort((a,b) => b.score-a.score);
 
-  if (!ranked.length) throw new Error(`No se encontró el tipo de inmueble "${value}"`);
+  if (!ranked.length) {
+    throw new Error(`No se encontró el tipo de inmueble "${value}". Opciones válidas: ${listOptions(rows, ["id", "idTipoInmueble", "id_tipo_inmueble", "tipo_inmueble_id"], (r) => r.nombre ?? r.nombreTipoInmueble ?? r.tipo_inmueble ?? r.descripcion)}`);
+  }
   console.log(`Tipo de inmueble resuelto: ${value} -> ${ranked[0].id}`);
   return ranked[0].id;
 }
@@ -385,16 +402,22 @@ async function resolvePackageId(value, propertyType) {
     const name = row.nombre_paquete ?? row.nombrePaquete ?? row.nombre ?? "";
     const category = row.categoria_servicio ?? row.categoria ?? "";
     let score = scoreText(name, value);
-    if (expected && compactText(category).includes(expected)) score += 200;
+    // v2.3.1: la categoría solo desempata; sin coincidencia de nombre no suma
+    // (antes cualquier paquete de Hogar "coincidía" con un nombre inventado).
+    if (score > 0 && expected && compactText(category).includes(expected)) score += 200;
     return {
       id: pickNumeric(row, ["id", "idPaquete", "id_paquete", "paquete_id"]),
       score
     };
   }).filter(x => x.id && x.score > 0).sort((a,b) => b.score-a.score);
 
-  if (!ranked.length) throw new Error(`No se encontró el paquete "${value}"`);
+  const packageOptions = () => listOptions(rows, ["id", "idPaquete", "id_paquete", "paquete_id"],
+    (r) => r.nombre_paquete ?? r.nombrePaquete ?? r.nombre);
+  if (!ranked.length) {
+    throw new Error(`No se encontró el paquete "${value}". Usa el ID de uno de estos paquetes: ${packageOptions()}`);
+  }
   if (ranked.length > 1 && ranked[0].score === ranked[1].score && ranked[0].id !== ranked[1].id) {
-    throw new Error(`El paquete "${value}" tiene más de una coincidencia`);
+    throw new Error(`El paquete "${value}" tiene más de una coincidencia. Usa el ID de uno de estos paquetes: ${packageOptions()}`);
   }
   console.log(`Paquete resuelto: ${value} -> ${ranked[0].id}`);
   return ranked[0].id;
@@ -571,7 +594,11 @@ async function proxyToLimpiafy(path, input = {}, transform = null) {
 function bridgeError(response, error) {
   console.error("Bridge error:", error);
   if (error?.payload) console.error("Respuesta API:", JSON.stringify(error.payload));
-  return response.status(500).json({
+  // v2.3.1: se responde HTTP 200 para que Respond.io entregue el mensaje
+  // al Agente IA. Con 500, Respond.io solo muestra "Request failed with
+  // status code 500" y la IA no sabe qué corregir. El fallo se identifica
+  // por success: 0 y code: "BRIDGE_ERROR".
+  return response.status(200).json({
     success: 0,
     code: "BRIDGE_ERROR",
     message: error?.message ?? "Error procesando la solicitud",
@@ -1092,6 +1119,10 @@ app.post("/cotizar-respondio", async (req, res) => {
 
     if (!dniCliente) throw new Error("Falta dni_cliente");
     if (!direccion) throw new Error("Falta direccion");
+    // v2.3.1: rechaza marcadores en lugar de una dirección real (ej. ".direccion").
+    if (direccion.length < 6 || /^[.{$]/.test(direccion) || /^direcci[oó]n$/i.test(direccion.replace(/^\W+/, ""))) {
+      throw new Error(`direccion inválida: "${direccion}". Envía la dirección completa en texto, tal como la dio el Usuario o como aparece en sus direcciones guardadas (ej. CL 50 #81B-19 apto 603).`);
+    }
     if (!input.prm_ciudad) throw new Error("Falta prm_ciudad");
     if (!input.prm_paquete) throw new Error("Falta prm_paquete");
     if (!input.prm_tipo_inmueble) throw new Error("Falta prm_tipo_inmueble");
