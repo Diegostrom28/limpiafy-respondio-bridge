@@ -35,7 +35,7 @@ const {
   LIMPIAFY_TIPOS_DOCUMENTO = ""
 } = process.env;
 
-const VERSION = "2.3.3";
+const VERSION = "2.3.4";
 
 function validateEnvironment() {
   const missing = [];
@@ -371,16 +371,58 @@ function listOptions(rows, idKeys, nameFn, max = 20) {
   return out.length ? out.join(", ") : "sin opciones disponibles";
 }
 
+// v2.3.4: extracción genérica de opciones {id, nombre} para respuestas cuyo
+// formato no coincide con los nombres de campo esperados.
+function allObjects(value) {
+  const out = [];
+  const visit = (node) => {
+    if (node == null) return;
+    if (Array.isArray(node)) { node.forEach(visit); return; }
+    if (typeof node !== "object") return;
+    out.push(node);
+    Object.values(node).forEach((child) => { if (child && typeof child === "object") visit(child); });
+  };
+  visit(unwrapData(value));
+  return out;
+}
+
+function genericOptions(response) {
+  const options = [];
+  for (const row of allObjects(response)) {
+    const entries = Object.entries(row);
+    const idEntry =
+      entries.find(([k, v]) => /^id$/i.test(k) && /^\d+$/.test(String(v ?? ""))) ??
+      entries.find(([k, v]) => /(^id|_id$|^prm_|Id$)/.test(k) && /^\d+$/.test(String(v ?? "")));
+    const nameEntry =
+      entries.find(([k, v]) => typeof v === "string" && /(nombre|descripcion|name|label|tipo|inmueble|valor)/i.test(k) && v.trim() && !/^\d+$/.test(v.trim())) ??
+      entries.find(([, v]) => typeof v === "string" && v.trim() && !/^\d+$/.test(v.trim()));
+    if (idEntry && nameEntry) options.push({ id: String(idEntry[1]).trim(), name: nameEntry[1].trim() });
+  }
+  const seen = new Set();
+  return options.filter((o) => (seen.has(o.id) ? false : (seen.add(o.id), true)));
+}
+
 async function resolvePropertyTypeId(value) {
   if (isNumericId(value)) return String(value);
-  const rows = objectRows(await buscar("TIPO_INMUEBLE", ""));
-  const ranked = rows.map((row) => ({
+  const response = await buscar("TIPO_INMUEBLE", "");
+  const rows = objectRows(response);
+  let ranked = rows.map((row) => ({
     id: pickNumeric(row, ["id", "idTipoInmueble", "id_tipo_inmueble", "tipo_inmueble_id"]),
     score: scoreText(row.nombre ?? row.nombreTipoInmueble ?? row.tipo_inmueble ?? row.descripcion ?? "", value)
   })).filter(x => x.id && x.score > 0).sort((a,b) => b.score-a.score);
 
+  let options = [];
   if (!ranked.length) {
-    throw new Error(`No se encontró el tipo de inmueble "${value}". Opciones válidas: ${listOptions(rows, ["id", "idTipoInmueble", "id_tipo_inmueble", "tipo_inmueble_id"], (r) => r.nombre ?? r.nombreTipoInmueble ?? r.tipo_inmueble ?? r.descripcion)}`);
+    options = genericOptions(response);
+    ranked = options.map((o) => ({ id: o.id, score: scoreText(o.name, value) }))
+      .filter(x => x.score > 0).sort((a,b) => b.score-a.score);
+  }
+
+  if (!ranked.length) {
+    console.log("Respuesta TIPO_INMUEBLE sin coincidencia:", JSON.stringify(response));
+    const list = options.length ? options.map((o) => `${o.id} (${o.name})`).join(", ")
+      : listOptions(rows, ["id", "idTipoInmueble", "id_tipo_inmueble", "tipo_inmueble_id"], (r) => r.nombre ?? r.nombreTipoInmueble ?? r.tipo_inmueble ?? r.descripcion);
+    throw new Error(`No se encontró el tipo de inmueble "${value}". Opciones válidas: ${list}. Reintenta con el ID; no le preguntes al Usuario.`);
   }
   console.log(`Tipo de inmueble resuelto: ${value} -> ${ranked[0].id}`);
   return ranked[0].id;
