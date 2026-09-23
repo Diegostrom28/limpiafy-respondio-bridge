@@ -3,15 +3,39 @@ import express from "express";
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
+// v2.3.0: limpieza global de lo que envia Respond.io antes de cualquier ruta.
+// - Elimina campos vacios o con "NO_APLICA" (en cualquier nivel del JSON).
+// - Normaliza celulares (+57) y numeros de documento con separadores.
+// /debug-respondio se deja sin tocar para poder ver el payload original.
+app.use((req, _res, next) => {
+  if (req.path !== "/debug-respondio" && req.body && typeof req.body === "object" && !Array.isArray(req.body)) {
+    const original = JSON.stringify(req.body);
+    const body = sanitizeValue(req.body) ?? {};
+    for (const key of ["celular", "celular2"]) {
+      if (body[key] !== undefined) body[key] = normalizeColombiaPhone(body[key]);
+    }
+    for (const key of ["dni_cliente", "numero_documento", "dni_empleada"]) {
+      if (body[key] !== undefined) body[key] = normalizeDocumentNumber(body[key]);
+    }
+    req.body = body;
+    const cleaned = JSON.stringify(req.body);
+    if (cleaned !== original) console.log(`Payload saneado ${req.path}:`, cleaned);
+  }
+  next();
+});
+
 const {
   PORT = "3000",
   LIMPIAFY_API_URL = "https://r394ip4mkf.execute-api.us-east-1.amazonaws.com/clientes",
   LIMPIAFY_X_APP,
   LIMPIAFY_X_TOKEN,
-  LIMPIAFY_X_KEY
+  LIMPIAFY_X_KEY,
+  // Opcional. Mapa de tipos de documento adicionales a su ID en
+  // prm_tipo_identificacion. Formato: "CE:2,NIT:3,PASAPORTE:4,PAS:4"
+  LIMPIAFY_TIPOS_DOCUMENTO = ""
 } = process.env;
 
-const VERSION = "2.2.7";
+const VERSION = "2.3.0";
 
 function validateEnvironment() {
   const missing = [];
@@ -56,6 +80,66 @@ function normalizeColombiaPhone(value) {
   return digits;
 }
 
+const NO_APLICA_VALUES = new Set(["noaplica", "na", "null", "undefined", "ninguno", "ninguna"]);
+
+function isNoAplica(value) {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return true;
+  // Solo se consideran marcadores escritos a proposito, no textos reales.
+  return NO_APLICA_VALUES.has(compactText(trimmed)) && trimmed.length <= 12;
+}
+
+// Elimina recursivamente undefined, null, "" y marcadores tipo NO_APLICA.
+// Conserva 0 y false (ej. limpiapay:false, envio_notificaciones_wsp:0).
+function sanitizeValue(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") return isNoAplica(value) ? undefined : value.trim();
+  if (Array.isArray(value)) {
+    return value.map(sanitizeValue).filter((item) => item !== undefined);
+  }
+  if (typeof value === "object") {
+    const out = {};
+    for (const [key, child] of Object.entries(value)) {
+      const clean = sanitizeValue(child);
+      if (clean !== undefined) out[key] = clean;
+    }
+    return out;
+  }
+  return value;
+}
+
+// Documento: si solo trae digitos con puntos, espacios o guiones, deja solo digitos.
+// Documentos alfanumericos (pasaporte) se dejan intactos.
+function normalizeDocumentNumber(value) {
+  const raw = String(value ?? "").trim();
+  if (/^[\d\s.\-]+$/.test(raw)) return raw.replace(/\D/g, "");
+  return raw;
+}
+
+// Identificador generico (valor): correo, celular o documento.
+function normalizeIdentifierValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw.includes("@")) return raw;
+  if (/^\+?[\d\s.\-()]+$/.test(raw)) {
+    const digits = raw.replace(/\D/g, "");
+    if (raw.startsWith("+") || (digits.length === 12 && digits.startsWith("57"))) {
+      return normalizeColombiaPhone(digits);
+    }
+    return digits;
+  }
+  return raw;
+}
+
+function parseDocumentTypeMap() {
+  const map = new Map();
+  for (const pair of String(LIMPIAFY_TIPOS_DOCUMENTO ?? "").split(",")) {
+    const [name, id] = pair.split(":").map((x) => String(x ?? "").trim());
+    if (name && isNumericId(id)) map.set(compactText(name), Number(id));
+  }
+  return map;
+}
+
 async function resolveDocumentTypeId(value) {
   if (isNumericId(value)) return Number(value);
 
@@ -96,6 +180,13 @@ async function resolveDocumentTypeId(value) {
     } catch (error) {
       console.log(`Busqueda ${tipo} no disponible para tipo_documento`);
     }
+  }
+
+  // Mapa configurable por variable de entorno (CE, NIT, pasaporte, etc.).
+  const configured = parseDocumentTypeMap();
+  if (configured.has(normalized)) {
+    console.log(`Tipo de documento resuelto por LIMPIAFY_TIPOS_DOCUMENTO: ${value} -> ${configured.get(normalized)}`);
+    return configured.get(normalized);
   }
 
   // Fallback documentado por la coleccion suministrada para persona natural.
@@ -227,21 +318,41 @@ async function resolveCityId(value) {
     normalizeText(value)
   ].filter(Boolean))];
 
+  let foundDisabled = false;
+
   for (const candidate of candidates) {
     const response = await buscar("DEPARTAMENTOS_CIUDADES", candidate);
     const rows = objectRows(response);
-    const ranked = rows.map((row) => ({
-      row,
-      id: pickNumeric(row, ["idCiudad", "id_ciudad", "ciudad_id"]),
-      score: scoreText(row.nombreCiudad ?? row.nombre_ciudad ?? row.ciudad ?? "", candidate) +
-        (String(row.habilitada_para_limpiafy ?? "1") === "1" ? 50 : -1000)
-    })).filter(x => x.id && x.score > 0).sort((a,b) => b.score-a.score);
 
-    if (ranked.length) {
-      console.log(`Ciudad resuelta: ${value} -> ${ranked[0].id}`);
-      return ranked[0].id;
+    // Mejor puntaje por ID de ciudad (evita duplicados del mismo registro).
+    const byId = new Map();
+    for (const row of rows) {
+      const id = pickNumeric(row, ["idCiudad", "id_ciudad", "ciudad_id"]);
+      if (!id) continue;
+      const textScore = scoreText(row.nombreCiudad ?? row.nombre_ciudad ?? row.ciudad ?? "", candidate);
+      if (textScore <= 0) continue;
+      const enabled = String(row.habilitada_para_limpiafy ?? "1") === "1";
+      if (!enabled) { foundDisabled = true; continue; }
+      const departamento = row.nombreDepartamento ?? row.nombre_departamento ?? row.departamento ?? "";
+      const prev = byId.get(id);
+      if (!prev || textScore > prev.score) byId.set(id, { id, score: textScore, departamento });
     }
+
+    const ranked = [...byId.values()].sort((a, b) => b.score - a.score);
+    if (!ranked.length) continue;
+
+    // Ciudades homonimas (ej. Rionegro Antioquia / Santander): no adivinar.
+    const tied = ranked.filter((x) => x.score === ranked[0].score);
+    if (tied.length > 1) {
+      const options = tied.map((x) => `${x.id}${x.departamento ? ` (${x.departamento})` : ""}`).join(", ");
+      throw new Error(`La ciudad "${value}" tiene más de una coincidencia: ${options}. Confirma el departamento con el Usuario y envía el ID de la ciudad.`);
+    }
+
+    console.log(`Ciudad resuelta: ${value} -> ${ranked[0].id}`);
+    return ranked[0].id;
   }
+
+  if (foundDisabled) throw new Error(`La ciudad "${value}" no está habilitada para Limpiafy`);
   throw new Error(`No se encontró una ciudad válida para "${value}"`);
 }
 
@@ -290,11 +401,13 @@ async function resolvePackageId(value, propertyType) {
 }
 
 function parseCalendar(value) {
-  if (Array.isArray(value)) return value;
+  if (Array.isArray(value)) return sanitizeValue(value);
   if (typeof value === "string") {
-    const parsed = JSON.parse(value);
+    let parsed;
+    try { parsed = JSON.parse(value); }
+    catch (error) { throw new Error(`calendario contiene JSON inválido: ${error.message}`); }
     if (!Array.isArray(parsed)) throw new Error("calendario no es un arreglo");
-    return parsed;
+    return sanitizeValue(parsed);
   }
   throw new Error("calendario debe ser un arreglo o un JSON de texto");
 }
@@ -416,7 +529,7 @@ function parseJsonIfNeeded(value, fieldName) {
   if (!trimmed) return value;
   if (!(trimmed.startsWith("[") || trimmed.startsWith("{"))) return value;
   try {
-    return JSON.parse(trimmed);
+    return sanitizeValue(JSON.parse(trimmed));
   } catch (error) {
     throw new Error(`${fieldName} contiene JSON inválido: ${error.message}`);
   }
@@ -522,7 +635,8 @@ app.post("/consultar", async (req, res) => {
       throw new Error(`operacion inválida. Usa: ${Object.keys(tipos).join(", ")}`);
     }
 
-    const valorFinal = ["PAQUETES", "TIPO_INMUEBLE"].includes(operacion) ? "" : valor;
+    let valorFinal = ["PAQUETES", "TIPO_INMUEBLE"].includes(operacion) ? "" : valor;
+    if (["CLIENTE", "DIRECCIONES"].includes(operacion)) valorFinal = normalizeIdentifierValue(valorFinal);
     return res.json(await buscar(tipo, valorFinal));
   } catch (error) { return bridgeError(res, error); }
 });
@@ -541,7 +655,7 @@ function clientIdentifierCandidates(body = {}) {
   add("numero_documento", body.numero_documento);
   add("celular", body.celular);
   add("email", body.email);
-  add("valor", body.valor);
+  add("valor", body.valor === undefined ? undefined : normalizeIdentifierValue(body.valor));
 
   // Para documento, agregamos variantes compatibles con los endpoints historicos.
   const doc = String(body.numero_documento ?? body.dni_cliente ?? "").trim();
@@ -856,14 +970,14 @@ app.post("/consultar-detalle-paquete", async (req, res) => {
 app.post("/consultar-cliente", async (req, res) => {
   try {
     const valor = req.body?.valor ?? req.body?.dni_cliente ?? req.body?.celular ?? req.body?.email ?? "";
-    return res.json(await buscar("CLIENTE_EXISTE", valor));
+    return res.json(await buscar("CLIENTE_EXISTE", normalizeIdentifierValue(valor)));
   } catch (error) { return bridgeError(res, error); }
 });
 
 app.post("/consultar-direcciones", async (req, res) => {
   try {
     const valor = req.body?.valor ?? req.body?.dni_cliente ?? req.body?.celular ?? req.body?.email ?? "";
-    return res.json(await buscar("DIRECCIONES_CLIENTE", valor));
+    return res.json(await buscar("DIRECCIONES_CLIENTE", normalizeIdentifierValue(valor)));
   } catch (error) { return bridgeError(res, error); }
 });
 
