@@ -35,7 +35,7 @@ const {
   LIMPIAFY_TIPOS_DOCUMENTO = ""
 } = process.env;
 
-const VERSION = "2.3.1";
+const VERSION = "2.3.3";
 
 function validateEnvironment() {
   const missing = [];
@@ -1111,18 +1111,61 @@ app.post("/confirmar-modificacion-reserva", async (req, res) => {
   catch (error) { return bridgeError(res, error); }
 });
 
+function isValidAddressText(value) {
+  const v = String(value ?? "").trim();
+  if (v.length < 6) return false;
+  if (/^[.{$]/.test(v)) return false;
+  if (/^direcci[oó]n$/i.test(v.replace(/^\W+/, ""))) return false;
+  return true;
+}
+
+function addressTextFromRow(row) {
+  const parts = [
+    row.direccion ?? row.direccion_cliente ?? row.direccionCliente ?? row.address,
+    row.nombre_edificio ?? row.nombreEdificio,
+    row.detalle_piso ?? row.detallePiso
+  ].map((v) => (typeof v === "string" ? v.trim() : "")).filter(Boolean);
+  return parts.join(", ");
+}
+
+async function resolveSavedAddress(dniCliente, prmCiudad, received) {
+  const invalidMsg = `No llegó la dirección en la petición (se recibió "${String(received ?? "").trim()}"). Es un problema de configuración, no del Usuario: NO le pidas apartamento, torre ni más datos. Reenvía la acción con la dirección exacta que el Usuario confirmó o escribió.`;
+  let rows = [];
+  try {
+    rows = objectRows(await buscar("DIRECCIONES_CLIENTE", dniCliente))
+      .filter((row) => typeof (row.direccion ?? row.direccion_cliente ?? row.direccionCliente) === "string");
+  } catch (error) {
+    console.log(`No fue posible consultar direcciones guardadas: ${error?.message}`);
+    throw new Error(invalidMsg);
+  }
+
+  const cityOf = (row) => pickNumeric(row, ["prm_ciudad", "idCiudad", "id_ciudad", "ciudad_id"]);
+  const withCity = rows.filter((row) => cityOf(row));
+  const sameCity = withCity.length
+    ? rows.filter((row) => cityOf(row) === String(prmCiudad))
+    : rows; // si la respuesta no trae ciudad, solo se acepta si hay una única dirección
+
+  const unique = [...new Map(sameCity.map((row) => [addressTextFromRow(row), row])).keys()].filter(isValidAddressText);
+  if (unique.length === 1) {
+    console.log(`Dirección tomada de las direcciones guardadas: ${unique[0]}`);
+    return unique[0];
+  }
+  if (unique.length > 1) {
+    throw new Error(`${invalidMsg} El Usuario tiene varias direcciones guardadas en esa ciudad: ${unique.join(" | ")}. Envía la que eligió.`);
+  }
+  throw new Error(invalidMsg);
+}
+
 app.post("/cotizar-respondio", async (req, res) => {
   try {
     const input = req.body ?? {};
     const dniCliente = String(input.dni_cliente ?? "").trim();
-    const direccion = String(input.direccion ?? "").trim();
+    // v2.3.2: acepta la dirección con nombres alternativos del campo en Respond.io.
+    const direccionCandidata = [
+      input.direccion, input.direccion_servicio, input.direccion_completa, input.address
+    ].map((v) => String(v ?? "").trim()).find((v) => isValidAddressText(v)) ?? "";
 
     if (!dniCliente) throw new Error("Falta dni_cliente");
-    if (!direccion) throw new Error("Falta direccion");
-    // v2.3.1: rechaza marcadores en lugar de una dirección real (ej. ".direccion").
-    if (direccion.length < 6 || /^[.{$]/.test(direccion) || /^direcci[oó]n$/i.test(direccion.replace(/^\W+/, ""))) {
-      throw new Error(`direccion inválida: "${direccion}". Envía la dirección completa en texto, tal como la dio el Usuario o como aparece en sus direcciones guardadas (ej. CL 50 #81B-19 apto 603).`);
-    }
     if (!input.prm_ciudad) throw new Error("Falta prm_ciudad");
     if (!input.prm_paquete) throw new Error("Falta prm_paquete");
     if (!input.prm_tipo_inmueble) throw new Error("Falta prm_tipo_inmueble");
@@ -1143,6 +1186,16 @@ app.post("/cotizar-respondio", async (req, res) => {
       resolvePackageId(input.prm_paquete, input.prm_tipo_inmueble)
     ]);
 
+    // v2.3.2: si Respond.io no entrega una dirección válida (ej. ".direccion"
+    // por una variable sin resolver), se usa la dirección guardada del Usuario
+    // en esa ciudad, siempre que sea una sola y no haya ambigüedad.
+    let direccion = direccionCandidata;
+    let usedSavedAddress = false;
+    if (!direccion) {
+      direccion = await resolveSavedAddress(dniCliente, prmCiudad, input.direccion);
+      usedSavedAddress = true;
+    }
+
     const payload = {
       dni_cliente: dniCliente,
       prm_paquete: Number(prmPaquete),
@@ -1162,6 +1215,13 @@ app.post("/cotizar-respondio", async (req, res) => {
     console.log("Payload enviado a Limpiafy:", JSON.stringify(payload));
     const apiResponse = await callApi("agenteIA/cotizar", payload);
     console.log("Respuesta cotización:", JSON.stringify(apiResponse));
+    if (usedSavedAddress && apiResponse && typeof apiResponse === "object") {
+      return res.status(200).json({
+        ...apiResponse,
+        direccion_utilizada: direccion,
+        aviso_direccion: "No llegó la dirección desde Respond.io; se cotizó con la dirección guardada del Usuario. Confírmala con el Usuario antes de pagar."
+      });
+    }
     return res.status(200).json(apiResponse);
   } catch (error) {
     return bridgeError(res, error);
